@@ -18,18 +18,8 @@ function projectTrackball(v: { x: number, y: number }) {
 }
 
 export type TrackballCameraOptions = {
-  ortho?: Ortho,
   rotation?: quat,
   dampingFactor?: number,
-}
-
-type Ortho = {
-  left: number,
-  right: number,
-  bottom: number,
-  top: number,
-  near: number,
-  far: number,
 }
 
 type Point = {
@@ -39,11 +29,6 @@ type Point = {
 
 
 export class TrackballCamera {
-
-  // options
-
-  // the orthographic camera settings
-  private ortho: Ortho;
   // this is the rotation that would applied to the object every frame not being dragged
   private rotationQ;
   // how much to damp the rotation at each step
@@ -143,19 +128,6 @@ export class TrackballCamera {
   discardTouchEvent = (e: TouchEvent) => e.preventDefault();
 
   constructor(ctx: HTMLElement, options: TrackballCameraOptions) {
-    if (options.ortho) {
-      this.ortho = options.ortho;
-    } else {
-      this.ortho = {
-        left: -1,
-        right: 1,
-        bottom: -1,
-        top: 1,
-        near: -1,
-        far: 1,
-      };
-    }
-
     if (options.rotation) {
       this.rotationQ = options.rotation;
     } else {
@@ -204,19 +176,13 @@ export class TrackballCamera {
     }  
   }
 
-  getTrackballCameraMatrix = (width: number, height: number) => {
+  viewMatrix = () => {
     const tmp = quat.mul(quat.create(), this.currQ, this.baseQ);
 
     const view = mat4.create();
     mat4.fromQuat(view, tmp);
 
-    const proj = mat4.create();
-    const b = this.ortho;
-    mat4.ortho(proj, b.left, b.right, b.bottom, b.top, b.near, b.far);
-
-    const out = mat4.create();
-    mat4.mul(out, proj, view);
-    return out;
+    return view;
   }
 }
 

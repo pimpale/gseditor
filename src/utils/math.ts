@@ -16,3 +16,7 @@ export function softmax(logits: number[]): number[] {
   const denom = scores.reduce((a, b) => a + b);
   return scores.map(s => s / denom);
 }
+
+export function deg2rad(deg: number): number {
+  return deg * Math.PI / 180;
+}
