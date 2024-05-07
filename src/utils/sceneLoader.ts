@@ -11,8 +11,10 @@ export type LoadedPly = {
     opacities: number[],
     // gaussian colors, size 3 * gaussianCount
     colors: number[],
-    // gaussian covariance matrices, size 6 * gaussianCount
-    cov3Ds: number[]
+    // gaussian covariance matrices, row 1, size 3 * gaussianCount
+    cov3Da: number[]
+    // gaussian covariance matrices, row 2, size 3 * gaussianCount
+    cov3Db: number[]
 }
 
 
@@ -34,13 +36,15 @@ async function loadPly(content: ArrayBuffer): Promise<LoadedPly> {
     const gaussianCount = parseInt(match[1]);
 
     // Create arrays for gaussian properties
-    const positions = []
-    const opacities = []
-    const rotations = []
-    const scales = []
-    const harmonics = []
-    const colors = []
-    const cov3Ds = []
+    const positions:number[] = []
+    const opacities:number[] = []
+    const rotations:number[] = []
+    const scales:number[] = []
+    const harmonics:number[] = []
+    const colors:number[] = []
+    const cov3Da:number[] = []    
+    const cov3Db:number[] = []
+
 
     // Scene bouding box
     let sceneMin = new Array(3).fill(Infinity)
@@ -126,8 +130,9 @@ async function loadPly(content: ArrayBuffer): Promise<LoadedPly> {
         // (Webgl-specific) Pre-compute the 3D covariance matrix from
         // the rotation and scale in order to avoid recomputing it at each frame.
         // This also allow to avoid sending rotations and scales to the web worker or GPU.
-        const cov3D = computeCov3D(scale, 1, rotation)
-        cov3Ds.push(...cov3D)
+        const [cov3Da, cov3Db] = computeCov3D(scale, 1, rotation)
+        cov3Da.push(...cov3Da)
+        cov3Db.push(...cov3Db)
         // rotations.push(...rotation)
         // scales.push(...scale)
 
@@ -138,14 +143,14 @@ async function loadPly(content: ArrayBuffer): Promise<LoadedPly> {
 
     return {
         sceneMax, sceneMin,
-        positions, opacities, colors, cov3Ds
+        positions, opacities, colors, cov3Da, cov3Db
     }
 }
 
 // Converts scale and rotation properties of each
 // Gaussian to a 3D covariance matrix in world space.
 // Original CUDA implementation: https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu#L118
-function computeCov3D(scale: vec3, mod: number, rot: vec4): number[] {
+function computeCov3D(scale: vec3, mod: number, rot: vec4): [number[], number[]] {
     const tmp = mat3.create()
     const S = mat3.create()
     const R = mat3.create()
@@ -177,38 +182,8 @@ function computeCov3D(scale: vec3, mod: number, rot: vec4): number[] {
     mat3.multiply(Sigma, mat3.transpose(tmp, M), M)  // Sigma = transpose(M) * M
 
     // Covariance is symmetric, only store upper right
-    const cov3D = [
-        Sigma[0], Sigma[1], Sigma[2],
-        Sigma[4], Sigma[5], Sigma[8]
+    return [
+        [Sigma[0], Sigma[1], Sigma[2]],
+        [Sigma[4], Sigma[5], Sigma[8]]
     ]
-
-    return cov3D
-}
-
-// Download a .ply file from a ReadableStream chunk by chunk and monitor the progress
-async function downloadPly(reader, contentLength) {
-    return new Promise(async (resolve, reject) => {
-        const buffer = new Uint8Array(contentLength)
-        let downloadedBytes = 0
-
-        const readNextChunk = async () => {
-            const { value, done } = await reader.read()
-
-            if (!done) {
-                downloadedBytes += value.byteLength
-                buffer.set(value, downloadedBytes - value.byteLength)
-
-                const progress = (downloadedBytes / contentLength) * 100
-                document.querySelector('#loading-bar').style.width = progress + '%'
-                document.querySelector('#loading-text').textContent = `Downloading 3D scene... ${progress.toFixed(2)}%`
-
-                readNextChunk()
-            }
-            else {
-                resolve(buffer)
-            }
-        }
-
-        readNextChunk()
-    })
 }

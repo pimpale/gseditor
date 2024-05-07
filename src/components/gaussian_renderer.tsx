@@ -207,8 +207,6 @@ void main() {
 }`;
 
 
-
-
 const invertRow = (mat: mat4, row: number) => {
   mat[row + 0] = -mat[row + 0]
   mat[row + 4] = -mat[row + 4]
@@ -226,7 +224,7 @@ const convertViewMatrixTargetCoordinateSystem = (vm: Readonly<mat4>) => {
   invertRow(viewMatrix, 2)
 
   return viewMatrix;
-} 
+}
 
 const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) => {
   // copy the viewProjMatrix
@@ -264,6 +262,15 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   private boxMaxLoc!: WebGLUniformLocation;
 
 
+  // buffers
+  private buffers!: {
+    color: WebGLBuffer,
+    center: WebGLBuffer,
+    opacity: WebGLBuffer,
+    covA: WebGLBuffer,
+    covB: WebGLBuffer,
+  }
+
   // ply data to render
   private loadedPlyData: LoadedPly | null = null;
 
@@ -295,69 +302,24 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
       ]
     )!;
 
-    // layout(location=0) in vec3 a_center;
-    // layout(location=1) in vec3 a_col;
-    // layout(location=2) in float a_opacity;
-    // layout(location=3) in vec3 a_covA;
-    // layout(location=4) in vec3 a_covB;
+    const setupAttributeBuffer = (name: string, components: number) => {
+      const location = this.gl.getAttribLocation(program, name)
+      const buffer = this.gl.createBuffer()!
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
+      this.gl.enableVertexAttribArray(location)
+      this.gl.vertexAttribPointer(location, components, this.gl.FLOAT, false, 0, 0)
+      this.gl.vertexAttribDivisor(location, 1)
+      return buffer
+    }
 
-    const centerLoc = this.gl.getAttribLocation(program, 'a_center');
-    const colLoc = this.gl.getAttribLocation(program, 'a_col');
-    const opacityLoc = this.gl.getAttribLocation(program, 'a_opacity');
-    const covALoc = this.gl.getAttribLocation(program, 'a_covA');
-    const covBLoc = this.gl.getAttribLocation(program, 'a_covB');
-
-    // setup our attributes to tell WebGL how to pull
-    // the data from the buffer above to the center attribute
-    this.gl.enableVertexAttribArray(centerLoc);
-    this.gl.vertexAttribPointer(
-      centerLoc,
-      3,                        // size (num components)
-      this.gl.FLOAT,            // type of data in buffer
-      false,                    // normalize
-      (3 + 3 + 1 + 3 + 3) * 4,  // stride (0 = auto)
-      0 * 4,                    // offset
-    );
-    // color attribute
-    this.gl.enableVertexAttribArray(colLoc);
-    this.gl.vertexAttribPointer(
-      colLoc,
-      3,                        // size (num components)
-      this.gl.FLOAT,            // type of data in buffer
-      false,                    // normalize
-      (3 + 3 + 1 + 3 + 3) * 4,  // stride (0 = auto)
-      3 * 4,                    // offset
-    );
-    // opacity attribute
-    this.gl.enableVertexAttribArray(opacityLoc);
-    this.gl.vertexAttribPointer(
-      opacityLoc,
-      1,                        // size (num components)
-      this.gl.FLOAT,            // type of data in buffer
-      false,                    // normalize
-      (3 + 3 + 1 + 3 + 3) * 4,  // stride (0 = auto)
-      (3 + 3) * 4,              // offset
-    );
-    // covA attribute
-    this.gl.enableVertexAttribArray(covALoc);
-    this.gl.vertexAttribPointer(
-      covALoc,
-      3,                        // size (num components)
-      this.gl.FLOAT,            // type of data in buffer
-      false,                    // normalize
-      (3 + 3 + 1 + 3 + 3) * 4,  // stride (0 = auto)
-      (3 + 3 + 1) * 4,          // offset
-    );
-    // covB attribute
-    this.gl.enableVertexAttribArray(covBLoc);
-    this.gl.vertexAttribPointer(
-      covBLoc,
-      3,                        // size (num components)
-      this.gl.FLOAT,            // type of data in buffer
-      false,                    // normalize
-      (3 + 3 + 1 + 3 + 3) * 4,  // stride (0 = auto)
-      (3 + 3 + 1 + 3) * 4,      // offset
-    );
+    // Create attribute buffers
+    this.buffers = {
+      color: setupAttributeBuffer('a_col', 3),
+      center: setupAttributeBuffer('a_center', 3),
+      opacity: setupAttributeBuffer('a_opacity', 1),
+      covA: setupAttributeBuffer('a_covA', 3),
+      covB: setupAttributeBuffer('a_covB', 3),
+    }
 
     // uniform float W;
     // uniform float H;
@@ -401,6 +363,20 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.camera.cleanup();
   }
 
+  setPlyData = (plyData: LoadedPly) => {
+    this.loadedPlyData = plyData;
+    const updateBuffer = (buffer: WebGLBuffer, data: Float32Array) => {
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, data, this.gl.DYNAMIC_DRAW)
+    }
+
+    updateBuffer(this.buffers.color, Float32Array.from(plyData.colors))
+    updateBuffer(this.buffers.center, Float32Array.from(plyData.positions))
+    updateBuffer(this.buffers.opacity, Float32Array.from(plyData.opacities))
+    updateBuffer(this.buffers.covA, Float32Array.from(plyData.cov3Da))
+    updateBuffer(this.buffers.covB, Float32Array.from(plyData.cov3Db))
+  }
+
   animationLoop = () => {
     this.requestID = window.requestAnimationFrame(this.animationLoop);
 
@@ -432,17 +408,17 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.gl.uniformMatrix4fv(this.viewMatrixLoc, false, convertViewMatrixTargetCoordinateSystem(viewMatrix));
     this.gl.uniformMatrix4fv(this.projMatrixLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(mat4.multiply(mat4.create(), projMatrix, viewMatrix)));
 
-    if(this.loadedPlyData) {
+    if (this.loadedPlyData) {
       this.gl.uniform3fv(this.boxMinLoc, this.loadedPlyData.sceneMin)
       this.gl.uniform3fv(this.boxMaxLoc, this.loadedPlyData.sceneMax)
-    
-      const n_gaussians = this.loadedPlyData.opacities.length; 
-    
+
+      const n_gaussians = this.loadedPlyData.opacities.length;
+
       // draw triangles
       this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, n_gaussians);
     }
 
-    
+
 
     this.camera.update();
   }
