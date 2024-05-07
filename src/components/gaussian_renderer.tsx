@@ -1,8 +1,9 @@
 import React from "react";
 import { createShader, createProgram } from '../utils/webgl';
 import { TrackballCamera, } from '../utils/camera';
-import { quat } from 'gl-matrix';
+import { mat4, quat } from 'gl-matrix';
 import { deg2rad } from "../utils/math";
+import { LoadedPly } from "../utils/sceneLoader";
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -206,6 +207,37 @@ void main() {
 }`;
 
 
+
+
+const invertRow = (mat: mat4, row: number) => {
+  mat[row + 0] = -mat[row + 0]
+  mat[row + 4] = -mat[row + 4]
+  mat[row + 8] = -mat[row + 8]
+  mat[row + 12] = -mat[row + 12]
+}
+
+// converts a standard mat4 view matrix to the cursed coordinate system of gaussian splatting
+const convertViewMatrixTargetCoordinateSystem = (vm: Readonly<mat4>) => {
+  // copy the view matrix
+  const viewMatrix = mat4.clone(vm)
+
+  invertRow(viewMatrix, 0) // NOTE: inverting the x axis is webgl specific
+  invertRow(viewMatrix, 1)
+  invertRow(viewMatrix, 2)
+
+  return viewMatrix;
+} 
+
+const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) => {
+  // copy the viewProjMatrix
+  const viewProjMatrix = mat4.clone(vpm)
+
+  invertRow(viewProjMatrix, 0) // NOTE: inverting the x axis is webgl specific
+  invertRow(viewProjMatrix, 1)
+
+  return viewProjMatrix;
+}
+
 const FOV_Y = 60;
 
 // TODO: learn how to handle error cases
@@ -230,6 +262,11 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   private viewMatrixLoc!: WebGLUniformLocation;
   private boxMinLoc!: WebGLUniformLocation;
   private boxMaxLoc!: WebGLUniformLocation;
+
+
+  // ply data to render
+  private loadedPlyData: LoadedPly | null = null;
+
 
   private requestID!: number;
 
@@ -357,7 +394,6 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.animationLoop();
   }
 
-
   componentWillUnmount() {
     // stop animation loop
     window.cancelAnimationFrame(this.requestID!);
@@ -376,6 +412,15 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     const focal_y = H / (2 * tan_fovy)
     const focal_x = W / (2 * tan_fovx)
 
+    const viewMatrix = this.camera.viewMatrix();
+
+    const projMatrix = mat4.perspective(
+      mat4.create(),
+      deg2rad(FOV_Y),
+      W / H,
+      0.1,
+      1000
+    );
 
     this.gl.uniform1f(this.wLoc, W);
     this.gl.uniform1f(this.hLoc, H);
@@ -384,17 +429,20 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.gl.uniform1f(this.tanFovXLoc, tan_fovx);
     this.gl.uniform1f(this.tanFovYLoc, tan_fovy);
     this.gl.uniform1f(this.scaleModifierLoc, 1.0);
+    this.gl.uniformMatrix4fv(this.viewMatrixLoc, false, convertViewMatrixTargetCoordinateSystem(viewMatrix));
+    this.gl.uniformMatrix4fv(this.projMatrixLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(mat4.multiply(mat4.create(), projMatrix, viewMatrix)));
+
+    if(this.loadedPlyData) {
+      this.gl.uniform3fv(this.boxMinLoc, this.loadedPlyData.sceneMin)
+      this.gl.uniform3fv(this.boxMaxLoc, this.loadedPlyData.sceneMax)
     
+      const n_gaussians = this.loadedPlyData.opacities.length; 
+    
+      // draw triangles
+      this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, n_gaussians);
+    }
 
-
-
-
-    const worldViewProjectionMat = this.camera.getTrackballCameraMatrix(this.props.width, this.props.height);
-    this.gl.uniformMatrix4fv(this.worldViewProjectionLoc, false, worldViewProjectionMat);
-
-
-    // draw triangles
-    this.gl.drawArrays(this.gl.TRIANGLES, 0, icoVertexes.length);
+    
 
     this.camera.update();
   }

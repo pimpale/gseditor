@@ -1,6 +1,6 @@
 import { mat3, vec3, vec4 } from 'gl-matrix';
 
-type LoadedPly = {
+export type LoadedPly = {
     // array of size 3 containing the minimum pos in scene
     sceneMin: number[],
     // array of size 3 containing the maximum pos in scene
