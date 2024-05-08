@@ -1,26 +1,27 @@
 import { mat3, vec3, vec4 } from 'gl-matrix';
 
-export type LoadedPly = {
+export type GaussianScene = {
+    count: number,
     // array of size 3 containing the minimum pos in scene
     sceneMin: number[],
     // array of size 3 containing the maximum pos in scene
     sceneMax: number[],
     // gaussian positions, size 3 * gaussianCount
-    positions: number[],
+    positions: Float32Array,
     // gaussian opacities, size gaussianCount
-    opacities: number[],
+    opacities: Float32Array,
     // gaussian colors, size 3 * gaussianCount
-    colors: number[],
+    colors: Float32Array,
     // gaussian covariance matrices, row 1, size 3 * gaussianCount
-    cov3Da: number[]
+    cov3Da: Float32Array
     // gaussian covariance matrices, row 2, size 3 * gaussianCount
-    cov3Db: number[]
+    cov3Db: Float32Array
 }
 
 
 // Load all gaussian data from a point-cloud file
 // Original C++ implementation: https://gitlab.inria.fr/sibr/sibr_core/-/blob/gaussian_code_release_union/src/projects/gaussianviewer/renderer/GaussianView.cpp#L70
-async function loadPly(content: ArrayBuffer): Promise<LoadedPly> {
+async function loadPly(content: ArrayBuffer): Promise<GaussianScene> {
     // Read header
     const start = performance.now()
     const contentStart = new TextDecoder('utf-8').decode(content.slice(0, 2000))
@@ -142,8 +143,14 @@ async function loadPly(content: ArrayBuffer): Promise<LoadedPly> {
     console.log(`Loaded ${gaussianCount} gaussians in ${((performance.now() - start) / 1000).toFixed(3)}s`)
 
     return {
-        sceneMax, sceneMin,
-        positions, opacities, colors, cov3Da, cov3Db
+        count: gaussianCount,
+        sceneMax,
+        sceneMin,
+        positions: Float32Array.from(positions),
+        opacities: Float32Array.from(opacities),
+        colors: Float32Array.from(colors),
+        cov3Da: Float32Array.from(cov3Da),
+        cov3Db: Float32Array.from(cov3Db)
     }
 }
 

@@ -3,7 +3,7 @@ import { createShader, createProgram } from '../utils/webgl';
 import { TrackballCamera, } from '../utils/camera';
 import { mat4, quat } from 'gl-matrix';
 import { deg2rad } from "../utils/math";
-import { LoadedPly } from "./gaussian_renderer_utils/sceneLoader";
+import { GaussianScene } from "./gaussian_renderer_utils/sceneLoader";
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -245,6 +245,7 @@ type GaussianRendererState = {}
 class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRendererState> {
   private canvas = React.createRef<HTMLCanvasElement>();
   private gl!: WebGL2RenderingContext;
+  private sortWorker: Worker;
 
   private camera!: TrackballCamera;
 
@@ -272,13 +273,14 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   }
 
   // ply data to render
-  private loadedPlyData: LoadedPly | null = null;
+  private loadedPlyData: GaussianScene | null = null;
 
 
   private requestID!: number;
 
   constructor(props: GaussianRendererProps) {
     super(props);
+    this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/worker_sort.ts', import.meta.url));
   }
 
   componentDidMount() {
@@ -363,18 +365,32 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.camera.cleanup();
   }
 
-  setPlyData = (plyData: LoadedPly) => {
-    this.loadedPlyData = plyData;
+  setPlyData = (gaussians: GaussianScene) => {
+    this.loadedPlyData = gaussians;
+
+    this.sortWorker.postMessage({
+      viewMatrix: this.camera.viewMatrix(),
+      sortingAlgorithm: 'Array.sort',
+      gaussians
+    });
+
+    this.sortWorker.onmessage = (e) => {
+      this.recieveUpdatedGaussianData(e.data.data);
+    }
+  }
+
+  // recieve ordered gaussian data from worker
+  recieveUpdatedGaussianData = (data: GaussianScene) => {
     const updateBuffer = (buffer: WebGLBuffer, data: Float32Array) => {
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
       this.gl.bufferData(this.gl.ARRAY_BUFFER, data, this.gl.DYNAMIC_DRAW)
     }
 
-    updateBuffer(this.buffers.color, Float32Array.from(plyData.colors))
-    updateBuffer(this.buffers.center, Float32Array.from(plyData.positions))
-    updateBuffer(this.buffers.opacity, Float32Array.from(plyData.opacities))
-    updateBuffer(this.buffers.covA, Float32Array.from(plyData.cov3Da))
-    updateBuffer(this.buffers.covB, Float32Array.from(plyData.cov3Db))
+    updateBuffer(this.buffers.color, data.colors)
+    updateBuffer(this.buffers.center, data.positions)
+    updateBuffer(this.buffers.opacity, data.opacities)
+    updateBuffer(this.buffers.covA, data.cov3Da)
+    updateBuffer(this.buffers.covB, data.cov3Db)
   }
 
   animationLoop = () => {

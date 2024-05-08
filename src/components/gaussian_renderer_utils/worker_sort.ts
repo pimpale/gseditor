@@ -1,42 +1,33 @@
-type GaussianData = {
-    positions: Float32Array,
-    opacities: Float32Array,
-    cov3Da: Float32Array,
-    cov3Db: Float32Array,
-    colors: Float32Array,
+import { GaussianScene } from "./sceneLoader"
+
+type SortWorkerInput = {
+    viewMatrix: Float32Array
+    sortingAlgorithm: string
+    gaussians: GaussianScene
 }
 
-
-self.onmessage = (event: MessageEvent<string>) => {
-    // Init web worker event
-    if (event.data.gaussians) {
-        gaussians = event.data.gaussians
-        gaussians.totalCount = gaussians.count
-
-        depthIndex = new Uint32Array(gaussians.count)
-
-        console.log(`[Worker] Received ${gaussians.count} gaussians`)
-        let data = {} as GaussianData
-        data.positions = new Float32Array(gaussians.count * 3)
-        data.opacities = new Float32Array(gaussians.count)
-        data.cov3Da = new Float32Array(gaussians.count * 3)
-        data.cov3Db = new Float32Array(gaussians.count * 3)
-        data.colors = new Float32Array(gaussians.count * 3)
-    }
-
+self.onmessage = (event: MessageEvent<SortWorkerInput>) => {
     // Sort gaussians event
-    else if (event.data.viewMatrix) {
-        const { viewMatrix, maxGaussians, sortingAlgorithm } = event.data
+    if (event.data.viewMatrix) {
+        const { gaussians: gaussians, viewMatrix, sortingAlgorithm } = event.data
 
         const start = performance.now()
 
-        gaussians.count = Math.min(gaussians.totalCount, maxGaussians)
-
         // Sort the gaussians!
-        sortGaussiansByDepth(depthIndex, gaussians, viewMatrix, sortingAlgorithm)
+        const depthIndex = sortGaussiansByDepth(gaussians, viewMatrix, sortingAlgorithm)
+
+        // create a new object to store the sorted data
+        const data = {
+            count: gaussians.count,
+            colors: new Float32Array(gaussians.count * 3),
+            positions: new Float32Array(gaussians.count * 3),
+            opacities: new Float32Array(gaussians.count),
+            cov3Da: new Float32Array(gaussians.count * 3),
+            cov3Db: new Float32Array(gaussians.count * 3),
+        }
 
         // Update arrays containing the data
-        for (let j = 0; j < gaussians.count; j++) {
+        for (let j = 0; j < depthIndex.length; j++) {
             const i = depthIndex[j]
 
             data.colors[j*3] = gaussians.colors[i*3]
@@ -51,13 +42,13 @@ self.onmessage = (event: MessageEvent<string>) => {
 
             // Split the covariance matrix into two vec3
             // so they can be used as vertex shader attributes
-            data.cov3Da[j*3] = gaussians.cov3Ds[i*6]
-            data.cov3Da[j*3+1] = gaussians.cov3Ds[i*6+1]
-            data.cov3Da[j*3+2] = gaussians.cov3Ds[i*6+2]
+            data.cov3Da[j*3] = gaussians.cov3Da[i*3]
+            data.cov3Da[j*3+1] = gaussians.cov3Da[i*3+1]
+            data.cov3Da[j*3+2] = gaussians.cov3Da[i*3+2]
 
-            data.cov3Db[j*3] = gaussians.cov3Ds[i*6+3]
-            data.cov3Db[j*3+1] = gaussians.cov3Ds[i*6+4]
-            data.cov3Db[j*3+2] = gaussians.cov3Ds[i*6+5]
+            data.cov3Db[j*3] = gaussians.cov3Db[i*3]
+            data.cov3Db[j*3+1] = gaussians.cov3Db[i*3+1]
+            data.cov3Db[j*3+2] = gaussians.cov3Db[i*3+2]
         }
 
         const sortTime = `${((performance.now() - start)/1000).toFixed(3)}s`
@@ -67,14 +58,15 @@ self.onmessage = (event: MessageEvent<string>) => {
             data, sortTime,
         })
     }
-  
-export {};
+}
 
 
-function sortGaussiansByDepth(depthIndex:Uint32Array, gaussians, viewMatrix:Float32Array, sortingAlgorithm:string) {
-    const calcDepth = (i) => gaussians.positions[i*3] * viewMatrix[2] +
+function sortGaussiansByDepth(gaussians: GaussianScene, viewMatrix:Float32Array, sortingAlgorithm:string): Uint32Array {
+    const calcDepth = (i:number) => gaussians.positions[i*3] * viewMatrix[2] +
                              gaussians.positions[i*3+1] * viewMatrix[6] +
                              gaussians.positions[i*3+2] * viewMatrix[10]
+
+    const depthIndex = new Uint32Array(gaussians.count)
 
     // Default javascript sort [~0.9s]
     if (sortingAlgorithm == 'Array.sort') {
@@ -125,6 +117,8 @@ function sortGaussiansByDepth(depthIndex:Uint32Array, gaussians, viewMatrix:Floa
         for (let i = 1; i < 256*256; i++) starts0[i] = starts0[i - 1] + counts0[i - 1];
         for (let i = 0; i < gaussians.count; i++) depthIndex[starts0[sizeList[i]]++] = i;
     }
+
+    return depthIndex;
 }
 
 // Quicksort algorithm - https://en.wikipedia.org/wiki/Quicksort#Hoare_partition_scheme
@@ -151,3 +145,5 @@ function partition(A:Float32Array, B: Float32Array|Uint32Array, lo:number, hi:nu
             tmp = B[i]; B[i] = B[j]; B[j] = tmp // Swap B
     }    
 }
+
+export {}
