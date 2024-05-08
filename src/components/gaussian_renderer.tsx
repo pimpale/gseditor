@@ -3,7 +3,7 @@ import { createShader, createProgram } from '../utils/webgl';
 import { TrackballCamera, } from '../utils/camera';
 import { mat4, quat } from 'gl-matrix';
 import { deg2rad } from "../utils/math";
-import { LoadedPly } from "../utils/sceneLoader";
+import { LoadedPly } from "./gaussian_renderer_utils/sceneLoader";
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
