@@ -21,7 +21,7 @@ export type GaussianScene = {
 
 // Load all gaussian data from a point-cloud file
 // Original C++ implementation: https://gitlab.inria.fr/sibr/sibr_core/-/blob/gaussian_code_release_union/src/projects/gaussianviewer/renderer/GaussianView.cpp#L70
-async function loadPly(content: ArrayBuffer): Promise<GaussianScene> {
+export function loadPly(content: ArrayBuffer): GaussianScene {
     // Read header
     const start = performance.now()
     const contentStart = new TextDecoder('utf-8').decode(content.slice(0, 2000))
@@ -37,14 +37,14 @@ async function loadPly(content: ArrayBuffer): Promise<GaussianScene> {
     const gaussianCount = parseInt(match[1]);
 
     // Create arrays for gaussian properties
-    const positions:number[] = []
-    const opacities:number[] = []
-    const rotations:number[] = []
-    const scales:number[] = []
-    const harmonics:number[] = []
-    const colors:number[] = []
-    const cov3Da:number[] = []    
-    const cov3Db:number[] = []
+    const positions: number[] = []
+    const opacities: number[] = []
+    const rotations: number[] = []
+    const scales: number[] = []
+    const harmonics: number[] = []
+    const colors: number[] = []
+    const cov3Da: number[] = []
+    const cov3Db: number[] = []
 
 
     // Scene bouding box

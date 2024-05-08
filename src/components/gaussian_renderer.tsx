@@ -3,7 +3,8 @@ import { createShader, createProgram } from '../utils/webgl';
 import { TrackballCamera, } from '../utils/camera';
 import { mat4, quat } from 'gl-matrix';
 import { deg2rad } from "../utils/math";
-import { GaussianScene } from "./gaussian_renderer_utils/sceneLoader";
+import { GaussianScene, loadPly } from "./gaussian_renderer_utils/sceneLoader";
+import Form from 'react-bootstrap/Form';
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -244,8 +245,9 @@ type GaussianRendererState = {}
 
 class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRendererState> {
   private canvas = React.createRef<HTMLCanvasElement>();
+  private fileInput = React.createRef<HTMLInputElement>();
   private gl!: WebGL2RenderingContext;
-  private sortWorker: Worker;
+  private sortWorker!: Worker;
 
   private camera!: TrackballCamera;
 
@@ -273,17 +275,18 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   }
 
   // ply data to render
-  private loadedPlyData: GaussianScene | null = null;
+  private plyData: GaussianScene | null = null;
+  private loadedSortedScene: GaussianScene | null = null;
 
 
   private requestID!: number;
 
   constructor(props: GaussianRendererProps) {
     super(props);
-    this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/worker_sort.ts', import.meta.url));
   }
 
   componentDidMount() {
+    this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/sortWorker.ts', import.meta.url));
 
     // init camera
     this.camera = new TrackballCamera(
@@ -359,15 +362,24 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   }
 
   componentWillUnmount() {
+    this.sortWorker.terminate();
     // stop animation loop
     window.cancelAnimationFrame(this.requestID!);
     // TODO: destroy vao, buffer, programs, shaders, etc
     this.camera.cleanup();
   }
 
-  setPlyData = (gaussians: GaussianScene) => {
-    this.loadedPlyData = gaussians;
+  handleFileInputChange = () => {
+    const ply_file = this.fileInput.current?.files?.[0];
+    if (ply_file) {
+      ply_file.arrayBuffer().then((buffer) => this.setPlyData(loadPly(buffer)));
+    }
+  }
 
+  setPlyData = (gaussians: GaussianScene) => {
+    this.plyData = gaussians;
+
+    console.log("sending data to worker")
     this.sortWorker.postMessage({
       viewMatrix: this.camera.viewMatrix(),
       sortingAlgorithm: 'Array.sort',
@@ -375,6 +387,7 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     });
 
     this.sortWorker.onmessage = (e) => {
+      console.log("recieved sorted data")
       this.recieveUpdatedGaussianData(e.data.data);
     }
   }
@@ -391,9 +404,12 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     updateBuffer(this.buffers.opacity, data.opacities)
     updateBuffer(this.buffers.covA, data.cov3Da)
     updateBuffer(this.buffers.covB, data.cov3Db)
+
+    this.loadedSortedScene = data;
   }
 
   animationLoop = () => {
+    this.camera.update();
     this.requestID = window.requestAnimationFrame(this.animationLoop);
 
     // set uniform
@@ -424,29 +440,29 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.gl.uniformMatrix4fv(this.viewMatrixLoc, false, convertViewMatrixTargetCoordinateSystem(viewMatrix));
     this.gl.uniformMatrix4fv(this.projMatrixLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(mat4.multiply(mat4.create(), projMatrix, viewMatrix)));
 
-    if (this.loadedPlyData) {
-      this.gl.uniform3fv(this.boxMinLoc, this.loadedPlyData.sceneMin)
-      this.gl.uniform3fv(this.boxMaxLoc, this.loadedPlyData.sceneMax)
-
-      const n_gaussians = this.loadedPlyData.opacities.length;
-
+    if (this.loadedSortedScene) {
+      this.gl.uniform3fv(this.boxMinLoc, this.loadedSortedScene.sceneMin)
+      this.gl.uniform3fv(this.boxMaxLoc, this.loadedSortedScene.sceneMax)
       // draw triangles
-      this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, n_gaussians);
+      this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, this.loadedSortedScene.count);
+      console.log("rendering")
     }
-
-
-
-    this.camera.update();
   }
 
   render() {
-    return <canvas
-      style={this.props.style}
-      className={this.props.className}
-      ref={this.canvas}
-      height={this.props.height}
-      width={this.props.width}
-    />
+    return <>
+      <canvas
+        style={this.props.style}
+        className={this.props.className}
+        ref={this.canvas}
+        height={this.props.height}
+        width={this.props.width}
+      />
+      <Form.Group controlId="formFile" className="mb-3">
+        <Form.Label>Select PLY File</Form.Label>
+        <Form.Control ref={this.fileInput} type="file" accept=".ply" onChange={this.handleFileInputChange} />
+      </Form.Group>
+    </>
   }
 }
 
