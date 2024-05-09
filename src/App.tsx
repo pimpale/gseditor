@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import reactLogo from './assets/react.svg'
 import viteLogo from '/vite.svg'
-import GaussianRenderer from './components/gaussian_renderer'
+import GaussianEditor from './components/gaussian_renderer'
 
 function App() {
   const [count, setCount] = useState(0)
@@ -25,7 +25,7 @@ function App() {
           Edit <code>src/App.tsx</code> and save to test HMR
         </p>
       </div>
-      <GaussianRenderer width={400} height={400} />
+      <GaussianEditor width={400} height={400} />
       <p className="read-the-docs">
         Click on the Vite and React logos to learn more
       </p>

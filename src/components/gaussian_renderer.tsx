@@ -1,10 +1,11 @@
 import React from "react";
-import { createShader, createProgram } from '../utils/webgl';
-import { TrackballCamera, } from '../utils/camera';
+import { createShader, createProgram, createTexture, createR32FTexture } from '../utils/webgl';
+import { Camera, TrackballCamera, } from '../utils/camera';
 import { mat4, quat } from 'gl-matrix';
 import { deg2rad } from "../utils/math";
 import { GaussianScene, loadPly } from "./gaussian_renderer_utils/sceneLoader";
 import Form from 'react-bootstrap/Form';
+import { genPlane } from "../utils/uvplane";
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -14,7 +15,7 @@ type GaussianRendererProps = {
 }
 
 
-const vs = `#version 300 es
+const gsengine_vs = `#version 300 es
 layout(location=0) in vec3 a_center;
 layout(location=1) in vec3 a_col;
 layout(location=2) in float a_opacity;
@@ -155,7 +156,7 @@ void main() {
     gl_Position = vec4(clip_pos, 0, 1);
 }`
 
-const fs = `#version 300 es
+const gsengine_fs = `#version 300 es
 precision mediump float;
 
 uniform bool show_depth_map;
@@ -167,7 +168,8 @@ in vec4 con_o;
 in vec2 xy;
 in vec2 pixf;
 
-out vec4 fragColor;
+layout(location=0) out vec4 fragColor;
+layout(location=1) out vec4 fragDepth;
 
 vec3 depth_palette(float x) { 
     x = min(1., x);
@@ -193,18 +195,13 @@ void main() {
     // Eq. (2) from 3D Gaussian splatting paper.
     float alpha = min(.99f, con_o.w * exp(power));
     
-    // (Custom) Colorize with depth value instead of color (z-buffer visualization)
-    vec3 color = col;
-    if (show_depth_map) {
-        color = depth_palette(depth * .08);
-    }
-
     if (alpha < 1./255.) {
         discard;
     }
 
     // Eq. (3) from 3D Gaussian splatting paper.
-    fragColor = vec4(color * alpha, alpha);
+    fragColor = vec4(col * alpha, alpha);
+    fragDepth = vec4(depth_palette(depth * .08) * alpha, alpha);
 }`;
 
 
@@ -237,33 +234,32 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
   return viewProjMatrix;
 }
 
-// TODO: learn how to handle error cases
+class GaussianRendererEngine {
+  // canvas to render to
+  private gl: WebGL2RenderingContext;
+  private program: WebGLProgram;
 
-type GaussianRendererState = {}
-
-class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRendererState> {
-  private canvas = React.createRef<HTMLCanvasElement>();
-  private fileInput = React.createRef<HTMLInputElement>();
-  private gl!: WebGL2RenderingContext;
-  private sortWorker!: Worker;
+  // worker
+  private sortWorker: Worker;
   private sortWorkerBusy: boolean = false;
   private lastSortedViewProjMatrix: mat4 | null = null;
 
-  private camera!: TrackballCamera;
+  // ply data to render
+  private plyData: GaussianScene | null = null;
+  private loadedSortedScene: GaussianScene | null = null;
 
   // uniforms
-  private wLoc!: WebGLUniformLocation;
-  private hLoc!: WebGLUniformLocation;
-  private focalXLoc!: WebGLUniformLocation;
-  private focalYLoc!: WebGLUniformLocation;
-  private tanFovXLoc!: WebGLUniformLocation;
-  private tanFovYLoc!: WebGLUniformLocation;
-  private scaleModifierLoc!: WebGLUniformLocation;
-  private projMatrixLoc!: WebGLUniformLocation;
-  private viewMatrixLoc!: WebGLUniformLocation;
-  private boxMinLoc!: WebGLUniformLocation;
-  private boxMaxLoc!: WebGLUniformLocation;
-
+  private wLoc: WebGLUniformLocation;
+  private hLoc: WebGLUniformLocation;
+  private focalXLoc: WebGLUniformLocation;
+  private focalYLoc: WebGLUniformLocation;
+  private tanFovXLoc: WebGLUniformLocation;
+  private tanFovYLoc: WebGLUniformLocation;
+  private scaleModifierLoc: WebGLUniformLocation;
+  private projMatrixLoc: WebGLUniformLocation;
+  private viewMatrixLoc: WebGLUniformLocation;
+  private boxMinLoc: WebGLUniformLocation;
+  private boxMaxLoc: WebGLUniformLocation;
 
   // buffers
   private buffers!: {
@@ -274,39 +270,29 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     covB: WebGLBuffer,
   }
 
-  // ply data to render
-  private plyData: GaussianScene | null = null;
-  private loadedSortedScene: GaussianScene | null = null;
+  private xsize: number;
+  private ysize: number;
 
+  public fbo: WebGLFramebuffer;
+  private col_tex: WebGLTexture;
+  private depth_tex: WebGLTexture;
 
-  private requestID!: number;
+  public get_xsize = () => this.xsize;
+  public get_ysize = () => this.ysize;
 
-  constructor(props: GaussianRendererProps) {
-    super(props);
-  }
-
-  componentDidMount() {
-    // init camera
-    this.camera = new TrackballCamera(
-      this.canvas.current!,
-      {
-        rotation: quat.fromEuler(quat.create(), 0, 0.001, 0)
-      }
-    );
-
-    // get webgl
-    this.gl = this.canvas.current!.getContext('webgl2')!;
-
-    const program = createProgram(
+  constructor(gl: WebGL2RenderingContext) {
+    this.gl = gl;
+    this.program = createProgram(
       this.gl,
       [
-        createShader(this.gl, this.gl.VERTEX_SHADER, vs),
-        createShader(this.gl, this.gl.FRAGMENT_SHADER, fs),
+        createShader(this.gl, this.gl.VERTEX_SHADER, gsengine_vs),
+        createShader(this.gl, this.gl.FRAGMENT_SHADER, gsengine_fs),
       ]
     )!;
+    this.gl.useProgram(this.program);
 
     const setupAttributeBuffer = (name: string, components: number) => {
-      const location = this.gl.getAttribLocation(program, name)
+      const location = this.gl.getAttribLocation(this.program, name)
       const buffer = this.gl.createBuffer()!
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
       this.gl.enableVertexAttribArray(location)
@@ -324,76 +310,65 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
       covB: setupAttributeBuffer('a_covB', 3),
     }
 
-    // uniform float W;
-    // uniform float H;
-    // uniform float focal_x;
-    // uniform float focal_y;
-    // uniform float tan_fovx;
-    // uniform float tan_fovy;
-    // uniform float scale_modifier;
-    // uniform mat4 projmatrix;
-    // uniform mat4 viewmatrix;
-    // uniform vec3 boxmin;
-    // uniform vec3 boxmax;
+    this.wLoc = this.gl.getUniformLocation(this.program, 'W')!;
+    this.hLoc = this.gl.getUniformLocation(this.program, 'H')!;
+    this.focalXLoc = this.gl.getUniformLocation(this.program, 'focal_x')!;
+    this.focalYLoc = this.gl.getUniformLocation(this.program, 'focal_y')!;
+    this.tanFovXLoc = this.gl.getUniformLocation(this.program, 'tan_fovx')!;
+    this.tanFovYLoc = this.gl.getUniformLocation(this.program, 'tan_fovy')!;
+    this.scaleModifierLoc = this.gl.getUniformLocation(this.program, 'scale_modifier')!;
+    this.projMatrixLoc = this.gl.getUniformLocation(this.program, 'projmatrix')!;
+    this.viewMatrixLoc = this.gl.getUniformLocation(this.program, 'viewmatrix')!;
+    this.boxMinLoc = this.gl.getUniformLocation(this.program, 'boxmin')!;
+    this.boxMaxLoc = this.gl.getUniformLocation(this.program, 'boxmax')!;
 
-    this.wLoc = this.gl.getUniformLocation(program, 'W')!;
-    this.hLoc = this.gl.getUniformLocation(program, 'H')!;
-    this.focalXLoc = this.gl.getUniformLocation(program, 'focal_x')!;
-    this.focalYLoc = this.gl.getUniformLocation(program, 'focal_y')!;
-    this.tanFovXLoc = this.gl.getUniformLocation(program, 'tan_fovx')!;
-    this.tanFovYLoc = this.gl.getUniformLocation(program, 'tan_fovy')!;
-    this.scaleModifierLoc = this.gl.getUniformLocation(program, 'scale_modifier')!;
-    this.projMatrixLoc = this.gl.getUniformLocation(program, 'projmatrix')!;
-    this.viewMatrixLoc = this.gl.getUniformLocation(program, 'viewmatrix')!;
-    this.boxMinLoc = this.gl.getUniformLocation(program, 'boxmin')!;
-    this.boxMaxLoc = this.gl.getUniformLocation(program, 'boxmax')!;
+    this.xsize = this.gl.canvas.width;
+    this.ysize = this.gl.canvas.height;
 
-    this.gl.useProgram(program);
+    // create color texture
+    this.fbo = this.gl.createFramebuffer()!;
+    // this makes fbo the current active framebuffer
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.fbo);
 
-    // settings
-    this.gl.disable(this.gl.DEPTH_TEST)
-    this.gl.enable(this.gl.BLEND);
-    this.gl.blendFunc(this.gl.ONE_MINUS_DST_ALPHA, this.gl.ONE)
+    // configure the currently active framebuffer to use color texture as color attachment 0 
+    this.col_tex = createTexture(this.gl, this.xsize, this.ysize)!;
+    this.gl.framebufferTexture2D(
+      this.gl.FRAMEBUFFER, // will bind as a framebuffer
+      this.gl.COLOR_ATTACHMENT0, // Attaches the texture to the framebuffer's color buffer. 
+      this.gl.TEXTURE_2D, // we have a 2d texture
+      this.col_tex, // the texture to attach
+      0 // the mipmap level (we don't want mipmapping, so we set to 0)
+    );
+    this.depth_tex = createTexture(this.gl, this.xsize, this.ysize)!;
+    this.gl.framebufferTexture2D(
+      this.gl.FRAMEBUFFER, // will bind as a framebuffer
+      this.gl.COLOR_ATTACHMENT1, // Attaches the texture to the framebuffer's depth buffer. 
+      this.gl.TEXTURE_2D, // we have a 2d texture
+      this.depth_tex, // the texture to attach
+      0 // the mipmap level (we don't want mipmapping, so we set to 0)
+    );
+
     // init sort worker
     this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/sortWorker.ts', import.meta.url), { type: 'module' });
     this.sortWorker.onmessage = (e) => {
-      console.log("recieved sorted data")
       this.sortWorkerBusy = false;
       this.recieveUpdatedGaussianData(e.data.data);
     }
-
-    // start animation loop
-    this.animationLoop();
   }
 
-  componentWillUnmount() {
-    this.sortWorker.terminate();
-    // stop animation loop
-    window.cancelAnimationFrame(this.requestID!);
-    // TODO: destroy vao, buffer, programs, shaders, etc
-    this.camera.cleanup();
+  setScene = (data: GaussianScene, camera: Camera) => {
+    this.plyData = data;
+    this.doWorkerSort(camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height));
   }
 
-  handleFileInputChange = () => {
-    const ply_file = this.fileInput.current?.files?.[0];
-    if (ply_file) {
-      ply_file.arrayBuffer().then((buffer) => this.setPlyData(loadPly(buffer)));
-    }
-  }
-
-  doWorkerSort = () => {
+  doWorkerSort = (viewProjMatrix: mat4) => {
     this.sortWorkerBusy = true;
-    this.lastSortedViewProjMatrix = this.camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height);
+    this.lastSortedViewProjMatrix = viewProjMatrix;
     this.sortWorker.postMessage({
       viewMatrix: this.lastSortedViewProjMatrix,
       sortingAlgorithm: 'Array.sort',
       gaussians: this.plyData
     });
-  }
-
-  setPlyData = (gaussians: GaussianScene) => {
-    this.plyData = gaussians;
-    this.doWorkerSort();
   }
 
   // recieve ordered gaussian data from worker
@@ -402,10 +377,6 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
       this.gl.bufferData(this.gl.ARRAY_BUFFER, data, this.gl.STATIC_DRAW)
     }
-
-    console.log(data.positions)
-    console.log(data.cov3Da)
-
     updateBuffer(this.buffers.color, data.colors)
     updateBuffer(this.buffers.center, data.positions)
     updateBuffer(this.buffers.opacity, data.opacities)
@@ -415,18 +386,27 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.loadedSortedScene = data;
   }
 
-  animationLoop = () => {
-    this.camera.update();
+  render = (camera: Camera) => {
+    this.gl.useProgram(this.program);
 
-    const W = this.gl.canvas.width;
-    const H = this.gl.canvas.height;
-    const tan_fovy = Math.tan(this.camera.fov() * 0.5)
+    // settings
+    this.gl.disable(this.gl.DEPTH_TEST)
+    this.gl.enable(this.gl.BLEND);
+    this.gl.blendFunc(this.gl.ONE_MINUS_DST_ALPHA, this.gl.ONE)
+
+    // bind the framebuffer
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.fbo);
+    this.gl.viewport(0, 0, this.xsize, this.ysize);
+
+    const W = this.xsize;
+    const H = this.ysize;
+    const tan_fovy = Math.tan(camera.fov() * 0.5)
     const tan_fovx = tan_fovy * W / H
     const focal_y = H / (2 * tan_fovy)
     const focal_x = W / (2 * tan_fovx)
 
-    const viewMatrix = this.camera.viewMatrix();
-    const viewProjMatrix = this.camera.viewProjMatrix(W, H)
+    const viewMatrix = camera.viewMatrix();
+    const viewProjMatrix = camera.viewProjMatrix(W, H)
 
     this.gl.uniform1f(this.wLoc, W);
     this.gl.uniform1f(this.hLoc, H);
@@ -442,17 +422,244 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
       this.gl.uniform3fv(this.boxMinLoc, this.loadedSortedScene.sceneMin)
       this.gl.uniform3fv(this.boxMaxLoc, this.loadedSortedScene.sceneMax)
       // draw triangles
+      this.gl.clear(this.gl.DEPTH_BUFFER_BIT | this.gl.COLOR_BUFFER_BIT);
+      this.gl.drawBuffers([this.gl.COLOR_ATTACHMENT0, this.gl.COLOR_ATTACHMENT1]);
       this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, this.loadedSortedScene.count);
     }
+  }
 
-    if (this.plyData && this.loadedSortedScene && this.lastSortedViewProjMatrix) {
+  update = (camera: Camera) => {
+    const viewProjMatrix = camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height);
+    if (this.loadedSortedScene && this.lastSortedViewProjMatrix) {
       const f = mat4.frob(mat4.subtract(mat4.create(), viewProjMatrix, this.lastSortedViewProjMatrix));
-      if (f > 0.1) {
-        if (!this.sortWorkerBusy) {
-          this.doWorkerSort();
-        }
+      if (f > 0.1 && !this.sortWorkerBusy) {
+        this.doWorkerSort(viewProjMatrix);
       }
     }
+  }
+
+  cleanup = () => {
+    this.sortWorker.terminate();
+    this.gl.deleteFramebuffer(this.fbo);
+    this.gl.deleteTexture(this.col_tex);
+    this.gl.deleteTexture(this.depth_tex);
+    this.gl.deleteProgram(this.program);
+    this.gl.deleteBuffer(this.buffers.color);
+    this.gl.deleteBuffer(this.buffers.center);
+    this.gl.deleteBuffer(this.buffers.opacity);
+    this.gl.deleteBuffer(this.buffers.covA);
+    this.gl.deleteBuffer(this.buffers.covB);
+  }
+}
+
+
+const viz_vs = `#version 300 es
+in vec2 a_position;
+out vec2 v_texCoord;
+
+void main() {
+  v_texCoord = a_position;
+
+  // convert from 0->1 to 0->2
+  // convert from 0->2 to -1->+1 (clip space)
+  vec2 clipSpace = (a_position * 2.0) - 1.0;
+
+  gl_Position = vec4(clipSpace, 0, 1);
+}`
+
+const viz_fs = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+// the rendered texture
+uniform sampler2D u_render_tex;
+
+in vec2 v_texCoord;
+out vec4 v_outColor;
+
+void main() {
+  v_outColor = texture(u_render_tex, vec2(v_texCoord.x, v_texCoord.y));
+}`;
+
+
+
+type VizData = {
+  gl: WebGL2RenderingContext,
+  program: WebGLProgram,
+  texLoc: WebGLUniformLocation,
+  tex: WebGLTexture
+}
+
+// TODO: learn how to handle error cases
+
+type GaussianEditorState = {}
+
+class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEditorState> {
+  private canvas = React.createRef<HTMLCanvasElement>();
+  private gl!: WebGL2RenderingContext;
+
+  // visualization canvases
+  private gsEngineColorViz = React.createRef<HTMLCanvasElement>();
+  private gsEngineDepthViz = React.createRef<HTMLCanvasElement>();
+  
+  // visualization canvas data
+  private colorVizData!: VizData;
+  private depthVizData!: VizData;
+
+  private fileInput = React.createRef<HTMLInputElement>();
+
+  private camera!: TrackballCamera;
+
+
+  private gsRendererEngine!: GaussianRendererEngine;
+
+  private requestID!: number;
+
+  constructor(props: GaussianRendererProps) {
+    super(props);
+  }
+
+  componentDidMount() {
+    const canvas = this.canvas.current!;
+    this.camera = new TrackballCamera(
+      canvas,
+      {
+        rotation: quat.fromEuler(quat.create(), 0, 0.001, 0)
+      }
+    );
+    this.gl = canvas.getContext('webgl2')!;
+    this.gsRendererEngine = new GaussianRendererEngine(this.gl);
+
+    // set up viz canvases
+    this.colorVizData = this.setupVizCanvas(this.gsEngineColorViz.current!);
+    this.depthVizData = this.setupVizCanvas(this.gsEngineDepthViz.current!);
+
+    this.requestID = window.requestAnimationFrame(this.animationLoop);
+  }
+
+  setupVizCanvas = (canvas: HTMLCanvasElement): VizData => {
+    const gl = canvas.getContext('webgl2')!;
+    // setup a full canvas clip space quad
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array(genPlane(1, 1).flatMap(v => [v[0], v[1]])),
+      gl.STATIC_DRAW
+    );
+
+    // setup viz program
+    const viz_program = createProgram(
+      gl,
+      [
+        createShader(gl, gl.VERTEX_SHADER, viz_vs),
+        createShader(gl, gl.FRAGMENT_SHADER, viz_fs),
+      ]
+    )!;
+
+    // set up position viz attributes
+    const positionLoc = gl.getAttribLocation(viz_program, 'a_position');
+
+    // setup our attributes to tell WebGL how to pull
+    // the data from the buffer above to the position attribute
+    gl.enableVertexAttribArray(positionLoc);
+    gl.vertexAttribPointer(
+      positionLoc,
+      2,         // size (num components)
+      this.gl.FLOAT,  // type of data in buffer
+      false,     // normalize
+      0,         // stride (0 = auto)
+      0,         // offset
+    );
+
+    // texture uniform
+    const texLoc = gl.getUniformLocation(viz_program, 'u_render_tex')!;
+
+    // create texture to go along with it
+    const tex = createTexture(gl, this.props.width, this.props.height)!;
+
+    return {
+      gl,
+      program: viz_program,
+      texLoc,
+      tex
+    }
+  }
+
+
+  visualizeTexture = (data: VizData, tex_data: Uint8Array) => {    
+    const gl = data.gl;
+    gl.useProgram(data.program);
+
+    // set the texture
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, data.tex);
+    gl.uniform1i(data.texLoc, 0);
+
+    // upload the texture data
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0, // mip level
+      gl.RGBA, // internal format
+      this.props.width,
+      this.props.height,
+      0, // border
+      gl.RGBA, // format
+      gl.UNSIGNED_BYTE, // type
+      tex_data
+    );
+
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.clear(gl.DEPTH_BUFFER_BIT | gl.COLOR_BUFFER_BIT);
+    // draw the quad
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+
+  componentWillUnmount() {
+    // stop animation loop
+    window.cancelAnimationFrame(this.requestID!);
+    // TODO: destroy vao, buffer, programs, shaders, etc
+    this.camera.cleanup();
+  }
+
+  handleFileInputChange = async () => {
+    const ply_file = this.fileInput.current?.files?.[0];
+    if (ply_file) {
+      this.gsRendererEngine.setScene(
+        loadPly(await ply_file.arrayBuffer()),
+        this.camera
+      );
+    }
+  }
+
+
+  animationLoop = () => {
+    this.camera.update();
+    this.gsRendererEngine.update(this.camera);
+
+    // render gaussians to texture
+    this.gsRendererEngine.render(this.camera);
+    
+    // copy color texture
+    const color_tex_data = new Uint8Array(this.gsRendererEngine.get_xsize() * this.gsRendererEngine.get_ysize() * 4);
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.gsRendererEngine.fbo);
+    this.gl.readBuffer(this.gl.COLOR_ATTACHMENT0);
+    this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA, this.gl.UNSIGNED_BYTE, color_tex_data);
+
+    // copy depth texture
+    const depth_tex_data = new Uint8Array(this.gsRendererEngine.get_xsize() * this.gsRendererEngine.get_ysize() * 4);
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.gsRendererEngine.fbo);
+    this.gl.readBuffer(this.gl.COLOR_ATTACHMENT1);
+    this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA, this.gl.UNSIGNED_BYTE, depth_tex_data);
+
+
+    // visualize textures
+    this.visualizeTexture(this.colorVizData, color_tex_data);
+    this.visualizeTexture(this.depthVizData, depth_tex_data);
+
+
 
     this.requestID = window.requestAnimationFrame(this.animationLoop);
   }
@@ -466,6 +673,20 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
         height={this.props.height}
         width={this.props.width}
       />
+      <canvas
+        style={this.props.style}
+        className={this.props.className}
+        ref={this.gsEngineColorViz}
+        height={this.props.height}
+        width={this.props.width}
+      />
+      <canvas
+        style={this.props.style}
+        className={this.props.className}
+        ref={this.gsEngineDepthViz}
+        height={this.props.height}
+        width={this.props.width}
+      />
       <Form.Group controlId="formFile" className="mb-3">
         <Form.Label>Select PLY File</Form.Label>
         <Form.Control ref={this.fileInput} type="file" accept=".ply" onChange={this.handleFileInputChange} />
@@ -474,4 +695,4 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   }
 }
 
-export default GaussianRenderer;
+export default GaussianEditor;

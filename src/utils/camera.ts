@@ -1,6 +1,16 @@
 import { glMatrix, quat, vec3, mat4 } from 'gl-matrix';
 import { deg2rad } from './math';
 
+export interface Camera {
+  fov: () => number;
+  viewMatrix: () => mat4;
+  viewProjMatrix: (width: number, height: number) => mat4;
+  update: () => void;
+  cleanup: () => void;
+} 
+
+
+
 // https://www.xarg.org/2021/07/trackball-rotation-using-quaternions/
 function projectTrackball(v: { x: number, y: number }) {
   const x = v.x;
@@ -30,7 +40,7 @@ type Point = {
 
 const FOV_Y = 47;
 
-export class TrackballCamera {
+export class TrackballCamera implements Camera {
   // this is the rotation that would applied to the object every frame not being dragged
   private rotationQ;
   // how much to damp the rotation at each step
@@ -90,7 +100,7 @@ export class TrackballCamera {
   }
 
   handleScroll = (e: WheelEvent) => {
-    this.offsetRadius += e.deltaY / 10;
+    this.offsetRadius += e.deltaY / 50;
   }
 
   handleMouseMove = (e: MouseEvent) => {
