@@ -6,6 +6,8 @@ import { deg2rad } from "../utils/math";
 import { GaussianScene, loadPly } from "./gaussian_renderer_utils/sceneLoader";
 import Form from 'react-bootstrap/Form';
 import { genPlane } from "../utils/uvplane";
+import { Vertex } from "../utils/vertex";
+import { polyline } from "../utils/polyline";
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -259,6 +261,8 @@ class GaussianRendererEngine {
   private boxMinLoc: WebGLUniformLocation;
   private boxMaxLoc: WebGLUniformLocation;
 
+  // vertex array object
+  private vao: WebGLVertexArrayObject;
   // buffers
   private buffers!: {
     color: WebGLBuffer,
@@ -298,6 +302,9 @@ class GaussianRendererEngine {
       this.gl.vertexAttribDivisor(location, 1)
       return buffer
     }
+
+    this.vao = this.gl.createVertexArray()!;
+    this.gl.bindVertexArray(this.vao);
 
     // Create attribute buffers
     this.buffers = {
@@ -396,6 +403,9 @@ class GaussianRendererEngine {
     this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.fbo);
     this.gl.viewport(0, 0, this.xsize, this.ysize);
 
+    // bind the vao (vertex buffers)
+    this.gl.bindVertexArray(this.vao);
+
     const W = this.xsize;
     const H = this.ysize;
     const tan_fovy = Math.tan(camera.fov() * 0.5)
@@ -472,7 +482,7 @@ precision highp float;
 in vec3 v_color;
 
 layout(location = 0) out vec4 outColor;
-layout(location = 1) out float depth;
+layout(location = 1) out vec4 depth;
 
 void main() {
   outColor = vec4(v_color, 1);
@@ -480,14 +490,14 @@ void main() {
 }`;
 
 type DrawableObject = {
-  positions: Float32Array,
-  colors: Float32Array,
+  vertexes: Vertex[]
 }
 
 class OverlayEngine {
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
 
+  private vao: WebGLVertexArrayObject;
   private positionBuffer: WebGLBuffer;
   private colorBuffer: WebGLBuffer;
 
@@ -526,6 +536,9 @@ class OverlayEngine {
       return buffer
     }
 
+    this.vao = this.gl.createVertexArray()!;
+    this.gl.bindVertexArray(this.vao);
+
     this.positionBuffer = setupAttributeBuffer('a_position', 3);
     this.colorBuffer = setupAttributeBuffer('a_color', 3);
 
@@ -561,15 +574,18 @@ class OverlayEngine {
 
   // updates the position and color buffers
   reconstructBuffers = () => {
-    this.n_vertexes = this.objects.reduce((acc, obj) => acc + obj.positions.length, 0);
+    this.n_vertexes = this.objects.reduce((acc, obj) => acc + obj.vertexes.length, 0);
     const positions = new Float32Array(this.n_vertexes * 3);
     const colors = new Float32Array(this.n_vertexes * 3);
 
     let offset = 0;
     for (const obj of this.objects) {
-      positions.set(obj.positions, offset);
-      colors.set(obj.colors, offset);
-      offset += obj.positions.length;
+      for (const vertex of obj.vertexes) {
+        positions.set(vertex.position, offset * 3);
+        console.log(vertex.color);
+        colors.set(vertex.color, offset * 3);
+        offset += 1;
+      }
     }
 
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.positionBuffer);
@@ -592,6 +608,8 @@ class OverlayEngine {
     this.gl.useProgram(this.program);
 
     this.gl.uniformMatrix4fv(this.viewProjLoc, false, camera.viewProjMatrix(this.xsize, this.ysize));
+
+    this.gl.bindVertexArray(this.vao);
 
     this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.fbo);
     this.gl.drawBuffers([this.gl.COLOR_ATTACHMENT0, this.gl.COLOR_ATTACHMENT1]);
@@ -658,8 +676,11 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
   private overlayEngineDepthViz = React.createRef<HTMLCanvasElement>();
 
   // visualization canvas data
-  private colorVizData!: VizData;
-  private depthVizData!: VizData;
+  private gsColorVizData!: VizData;
+  private gsDepthVizData!: VizData;
+
+  private overlayColorVizData!: VizData;
+  private overlayDepthVizData!: VizData;
 
   private fileInput = React.createRef<HTMLInputElement>();
 
@@ -692,9 +713,34 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.gsRendererEngine = new GaussianRendererEngine(this.gl);
     this.overlayEngine = new OverlayEngine(this.gl);
 
+
+    this.overlayEngine.addObject({
+      vertexes: polyline(
+        // points in the line
+        [[0, 0, 0],
+        [1, 1, 0],
+        [1, 0, 0],
+        [0, 0, 0]],
+        // normals 
+        [[0, 0, 1],
+        [0, 0, 1],
+        [0, 0, 1],
+        [0, 0, 1]],
+        // width
+        [0.1, 0.1, 0.1, 0.1],
+        // colors
+        [[1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1]],
+      )
+    });
+
     // set up viz canvases
-    this.colorVizData = this.setupVizCanvas(this.gsEngineColorViz.current!);
-    this.depthVizData = this.setupVizCanvas(this.gsEngineDepthViz.current!);
+    this.gsColorVizData = this.setupVizCanvas(this.gsEngineColorViz.current!);
+    this.gsDepthVizData = this.setupVizCanvas(this.gsEngineDepthViz.current!);
+    this.overlayColorVizData = this.setupVizCanvas(this.overlayEngineColorViz.current!);
+    this.overlayDepthVizData = this.setupVizCanvas(this.overlayEngineDepthViz.current!);
+
 
     this.requestID = window.requestAnimationFrame(this.animationLoop);
   }
@@ -823,19 +869,35 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.gl.readBuffer(this.gl.COLOR_ATTACHMENT1);
     this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA, this.gl.FLOAT, depth_tex_data);
 
+    // visualize textures
+    this.visualizeTexture(this.gsColorVizData, color_tex_data);
+    this.visualizeTexture(this.gsDepthVizData, this.convertTex(depth_tex_data));
+
+    // render overlay to texture
+    this.overlayEngine.render(this.camera);
+
+    // copy color texture
+    const overlay_color_tex_data = new Uint8Array(this.overlayEngine.get_xsize() * this.overlayEngine.get_ysize() * 4);
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.overlayEngine.fbo);
+    this.gl.readBuffer(this.gl.COLOR_ATTACHMENT0);
+    this.gl.readPixels(0, 0, this.overlayEngine.get_xsize(), this.overlayEngine.get_ysize(), this.gl.RGBA, this.gl.UNSIGNED_BYTE, overlay_color_tex_data);
+
+    // copy depth texture
+    const overlay_depth_tex_data = new Float32Array(this.overlayEngine.get_xsize() * this.overlayEngine.get_ysize() * 4);
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.overlayEngine.fbo);
+    this.gl.readBuffer(this.gl.COLOR_ATTACHMENT1);
+    this.gl.readPixels(0, 0, this.overlayEngine.get_xsize(), this.overlayEngine.get_ysize(), this.gl.RGBA, this.gl.FLOAT, overlay_depth_tex_data);
 
     // visualize textures
-    this.visualizeTexture(this.colorVizData, color_tex_data);
-    this.visualizeTexture(this.depthVizData, this.convertTex(depth_tex_data));
-
-
+    this.visualizeTexture(this.overlayColorVizData, overlay_color_tex_data);
+    this.visualizeTexture(this.overlayDepthVizData, this.convertTex(overlay_depth_tex_data));
 
     this.requestID = window.requestAnimationFrame(this.animationLoop);
   }
 
   render() {
     return <>
-      <canvas
+      < canvas
         style={this.props.style}
         className={this.props.className}
         ref={this.canvas}
@@ -856,7 +918,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
         height={this.props.height}
         width={this.props.width}
       />
-            <canvas
+      <canvas
         style={this.props.style}
         className={this.props.className}
         ref={this.overlayEngineColorViz}
