@@ -3,9 +3,9 @@ import { mat3, vec3, vec4 } from 'gl-matrix';
 export type GaussianScene = {
     count: number,
     // array of size 3 containing the minimum pos in scene
-    sceneMin: number[],
+    sceneMin: Float32Array,
     // array of size 3 containing the maximum pos in scene
-    sceneMax: number[],
+    sceneMax: Float32Array,
     // gaussian positions, size 3 * gaussianCount
     positions: Float32Array,
     // gaussian opacities, size gaussianCount
@@ -131,9 +131,9 @@ export function loadPly(content: ArrayBuffer): GaussianScene {
         // (Webgl-specific) Pre-compute the 3D covariance matrix from
         // the rotation and scale in order to avoid recomputing it at each frame.
         // This also allow to avoid sending rotations and scales to the web worker or GPU.
-        const [cov3Da, cov3Db] = computeCov3D(scale, 1, rotation)
-        cov3Da.push(...cov3Da)
-        cov3Db.push(...cov3Db)
+        const [cov3Ds_a, cov3Ds_b] = computeCov3D(scale, 1, rotation)
+        cov3Da.push(...cov3Ds_a)
+        cov3Db.push(...cov3Ds_b)
         // rotations.push(...rotation)
         // scales.push(...scale)
 
@@ -141,11 +141,11 @@ export function loadPly(content: ArrayBuffer): GaussianScene {
     }
 
     console.log(`Loaded ${gaussianCount} gaussians in ${((performance.now() - start) / 1000).toFixed(3)}s`)
-
+    
     return {
         count: gaussianCount,
-        sceneMax,
-        sceneMin,
+        sceneMax: Float32Array.from(sceneMax),
+        sceneMin: Float32Array.from(sceneMin),
         positions: Float32Array.from(positions),
         opacities: Float32Array.from(opacities),
         colors: Float32Array.from(colors),

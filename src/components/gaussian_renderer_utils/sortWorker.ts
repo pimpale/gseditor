@@ -1,3 +1,4 @@
+import assert from "../../utils/assert"
 import { GaussianScene } from "./sceneLoader"
 
 type SortWorkerInput = {
@@ -6,7 +7,7 @@ type SortWorkerInput = {
     gaussians: GaussianScene
 }
 
-self.onmessage = (event: MessageEvent<SortWorkerInput>) => {
+onmessage = (event: MessageEvent<SortWorkerInput>) => {
     console.log("[Worker] Received message")
 
     const { gaussians, viewMatrix, sortingAlgorithm } = event.data
@@ -17,8 +18,10 @@ self.onmessage = (event: MessageEvent<SortWorkerInput>) => {
     const depthIndex = sortGaussiansByDepth(gaussians, viewMatrix, sortingAlgorithm)
 
     // create a new object to store the sorted data
-    const data = {
+    const data: GaussianScene = {
         count: gaussians.count,
+        sceneMin: gaussians.sceneMin,
+        sceneMax: gaussians.sceneMax,
         colors: new Float32Array(gaussians.count * 3),
         positions: new Float32Array(gaussians.count * 3),
         opacities: new Float32Array(gaussians.count),
@@ -50,6 +53,10 @@ self.onmessage = (event: MessageEvent<SortWorkerInput>) => {
         data.cov3Db[j * 3 + 1] = gaussians.cov3Db[i * 3 + 1]
         data.cov3Db[j * 3 + 2] = gaussians.cov3Db[i * 3 + 2]
     }
+
+    // Check that the arrays are the correct length
+    assert(data.cov3Da.length == 3*gaussians.count, "cov3Da count mismatch")
+    assert(data.cov3Db.length == 3*gaussians.count, "cov3Db count mismatch")
 
     const sortTime = `${((performance.now() - start) / 1000).toFixed(3)}s`
     console.log(`[Worker] Sorted ${gaussians.count} gaussians in ${sortTime}. Algorithm: ${sortingAlgorithm}`)
@@ -145,5 +152,3 @@ function partition(A: Float32Array, B: Float32Array | Uint32Array, lo: number, h
         tmp = B[i]; B[i] = B[j]; B[j] = tmp // Swap B
     }
 }
-
-export { }

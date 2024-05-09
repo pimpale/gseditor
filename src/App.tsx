@@ -25,7 +25,7 @@ function App() {
           Edit <code>src/App.tsx</code> and save to test HMR
         </p>
       </div>
-      <GaussianRenderer width={800} height={600} />
+      <GaussianRenderer width={400} height={400} />
       <p className="read-the-docs">
         Click on the Vite and React logos to learn more
       </p>

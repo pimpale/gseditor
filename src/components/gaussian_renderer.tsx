@@ -237,8 +237,6 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
   return viewProjMatrix;
 }
 
-const FOV_Y = 60;
-
 // TODO: learn how to handle error cases
 
 type GaussianRendererState = {}
@@ -248,6 +246,8 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   private fileInput = React.createRef<HTMLInputElement>();
   private gl!: WebGL2RenderingContext;
   private sortWorker!: Worker;
+  private sortWorkerBusy: boolean = false;
+  private lastSortedViewProjMatrix: mat4 | null = null;
 
   private camera!: TrackballCamera;
 
@@ -286,18 +286,16 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
   }
 
   componentDidMount() {
-    this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/sortWorker.ts', import.meta.url));
-
     // init camera
     this.camera = new TrackballCamera(
       this.canvas.current!,
       {
-        rotation: quat.fromEuler(quat.create(), 0, 0.1, 0)
+        rotation: quat.fromEuler(quat.create(), 0, 0.001, 0)
       }
     );
 
     // get webgl
-    this.gl = this.canvas.current!.getContext('webgl2', { premultipliedAlpha: false })!;
+    this.gl = this.canvas.current!.getContext('webgl2')!;
 
     const program = createProgram(
       this.gl,
@@ -355,7 +353,14 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     // settings
     this.gl.disable(this.gl.DEPTH_TEST)
     this.gl.enable(this.gl.BLEND);
-    this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
+    this.gl.blendFunc(this.gl.ONE_MINUS_DST_ALPHA, this.gl.ONE)
+    // init sort worker
+    this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/sortWorker.ts', import.meta.url), { type: 'module' });
+    this.sortWorker.onmessage = (e) => {
+      console.log("recieved sorted data")
+      this.sortWorkerBusy = false;
+      this.recieveUpdatedGaussianData(e.data.data);
+    }
 
     // start animation loop
     this.animationLoop();
@@ -376,28 +381,30 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     }
   }
 
+  doWorkerSort = () => {
+    this.sortWorkerBusy = true;
+    this.lastSortedViewProjMatrix = this.camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height);
+    this.sortWorker.postMessage({
+      viewMatrix: this.lastSortedViewProjMatrix,
+      sortingAlgorithm: 'Array.sort',
+      gaussians: this.plyData
+    });
+  }
+
   setPlyData = (gaussians: GaussianScene) => {
     this.plyData = gaussians;
-
-    console.log("sending data to worker")
-    this.sortWorker.postMessage({
-      viewMatrix: this.camera.viewMatrix(),
-      sortingAlgorithm: 'Array.sort',
-      gaussians
-    });
-
-    this.sortWorker.onmessage = (e) => {
-      console.log("recieved sorted data")
-      this.recieveUpdatedGaussianData(e.data.data);
-    }
+    this.doWorkerSort();
   }
 
   // recieve ordered gaussian data from worker
   recieveUpdatedGaussianData = (data: GaussianScene) => {
     const updateBuffer = (buffer: WebGLBuffer, data: Float32Array) => {
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
-      this.gl.bufferData(this.gl.ARRAY_BUFFER, data, this.gl.DYNAMIC_DRAW)
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, data, this.gl.STATIC_DRAW)
     }
+
+    console.log(data.positions)
+    console.log(data.cov3Da)
 
     updateBuffer(this.buffers.color, data.colors)
     updateBuffer(this.buffers.center, data.positions)
@@ -410,25 +417,16 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
 
   animationLoop = () => {
     this.camera.update();
-    this.requestID = window.requestAnimationFrame(this.animationLoop);
 
-    // set uniform
     const W = this.gl.canvas.width;
     const H = this.gl.canvas.height;
-    const tan_fovy = Math.tan(FOV_Y * 0.5)
+    const tan_fovy = Math.tan(this.camera.fov() * 0.5)
     const tan_fovx = tan_fovy * W / H
     const focal_y = H / (2 * tan_fovy)
     const focal_x = W / (2 * tan_fovx)
 
     const viewMatrix = this.camera.viewMatrix();
-
-    const projMatrix = mat4.perspective(
-      mat4.create(),
-      deg2rad(FOV_Y),
-      W / H,
-      0.1,
-      1000
-    );
+    const viewProjMatrix = this.camera.viewProjMatrix(W, H)
 
     this.gl.uniform1f(this.wLoc, W);
     this.gl.uniform1f(this.hLoc, H);
@@ -438,15 +436,25 @@ class GaussianRenderer extends React.Component<GaussianRendererProps, GaussianRe
     this.gl.uniform1f(this.tanFovYLoc, tan_fovy);
     this.gl.uniform1f(this.scaleModifierLoc, 1.0);
     this.gl.uniformMatrix4fv(this.viewMatrixLoc, false, convertViewMatrixTargetCoordinateSystem(viewMatrix));
-    this.gl.uniformMatrix4fv(this.projMatrixLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(mat4.multiply(mat4.create(), projMatrix, viewMatrix)));
+    this.gl.uniformMatrix4fv(this.projMatrixLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(viewProjMatrix));
 
     if (this.loadedSortedScene) {
       this.gl.uniform3fv(this.boxMinLoc, this.loadedSortedScene.sceneMin)
       this.gl.uniform3fv(this.boxMaxLoc, this.loadedSortedScene.sceneMax)
       // draw triangles
       this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, this.loadedSortedScene.count);
-      console.log("rendering")
     }
+
+    if (this.plyData && this.loadedSortedScene && this.lastSortedViewProjMatrix) {
+      const f = mat4.frob(mat4.subtract(mat4.create(), viewProjMatrix, this.lastSortedViewProjMatrix));
+      if (f > 0.1) {
+        if (!this.sortWorkerBusy) {
+          this.doWorkerSort();
+        }
+      }
+    }
+
+    this.requestID = window.requestAnimationFrame(this.animationLoop);
   }
 
   render() {

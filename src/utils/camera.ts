@@ -1,4 +1,5 @@
 import { glMatrix, quat, vec3, mat4 } from 'gl-matrix';
+import { deg2rad } from './math';
 
 // https://www.xarg.org/2021/07/trackball-rotation-using-quaternions/
 function projectTrackball(v: { x: number, y: number }) {
@@ -27,6 +28,7 @@ type Point = {
   y: number
 }
 
+const FOV_Y = 47;
 
 export class TrackballCamera {
   // this is the rotation that would applied to the object every frame not being dragged
@@ -48,6 +50,9 @@ export class TrackballCamera {
   private currQ = quat.create();
   // the rotation used for momentum
   private momentumQ = quat.create();
+
+  // the offset radius to use
+  private offsetRadius = 1;
 
   // when not being dragged, how much to show the momentum
   private currentMomentumLevel = 0;
@@ -74,10 +79,18 @@ export class TrackballCamera {
     return q;
   }
 
+  fov = () => {
+    return deg2rad(FOV_Y);
+  }
+
   handleMouseDown = (e: MouseEvent) => {
     // set data
     const loc = this.getNormalizedMouseCoords(e);
     this.mouseLoc = { start: loc, current: loc, previous: loc };
+  }
+
+  handleScroll = (e: WheelEvent) => {
+    this.offsetRadius += e.deltaY / 10;
   }
 
   handleMouseMove = (e: MouseEvent) => {
@@ -144,6 +157,7 @@ export class TrackballCamera {
     this.canvas = ctx;
 
     this.canvas.addEventListener('pointerdown', this.handleMouseDown);
+    this.canvas.addEventListener('wheel', this.handleScroll);
     window.addEventListener('pointermove', this.handleMouseMove);
     window.addEventListener('pointerup', this.handleMouseUp);
 
@@ -157,6 +171,7 @@ export class TrackballCamera {
 
   cleanup = () => {
     this.canvas.removeEventListener('pointerdown', this.handleMouseDown);
+    this.canvas.removeEventListener('wheel', this.handleScroll);
     window.removeEventListener('pointermove', this.handleMouseMove);
     window.removeEventListener('pointerup', this.handleMouseUp);
 
@@ -179,10 +194,22 @@ export class TrackballCamera {
   viewMatrix = () => {
     const tmp = quat.mul(quat.create(), this.currQ, this.baseQ);
 
-    const view = mat4.create();
-    mat4.fromQuat(view, tmp);
-
+    const view = mat4.fromRotationTranslation(mat4.create(), tmp, [0, 0, -this.offsetRadius]);
+   
     return view;
+  }
+
+  viewProjMatrix = (width: number, height: number) => {
+    const projMatrix = mat4.perspective(
+      mat4.create(),
+      this.fov(),
+      width / height,
+      1,
+      1000
+    );
+
+    const viewMatrix = this.viewMatrix();
+    return mat4.mul(mat4.create(), projMatrix, viewMatrix);
   }
 }
 
