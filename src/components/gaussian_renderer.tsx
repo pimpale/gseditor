@@ -201,7 +201,7 @@ void main() {
 
     // Eq. (3) from 3D Gaussian splatting paper.
     fragColor = vec4(col * alpha, alpha);
-    fragInvDepth = vec4(vec3(1.0/depth), 1.0);
+    fragInvDepth = vec4(vec3(1.0/depth) * alpha, alpha);
 }`;
 
 
