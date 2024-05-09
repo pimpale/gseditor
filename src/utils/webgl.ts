@@ -259,3 +259,35 @@ export function overwriteRGBA32FTexture(gl: WebGL2RenderingContext, xoff: number
   );
 }
 
+export function createDepth32FTexture(gl: WebGL2RenderingContext, width: number, height: number, data: Float32Array) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(
+    gl.TEXTURE_2D,        // target
+    0,                    // mip level
+    gl.DEPTH_COMPONENT32F,// internal format
+    width,                // width
+    height,               // height
+    0,                    // border
+    gl.DEPTH_COMPONENT,   // format
+    gl.FLOAT,             // type
+    data,                 // data
+  );
+  return tex;
+}
+
+export function overwriteDepth32FTexture(gl: WebGL2RenderingContext, xoff: number, yoff: number, width: number, height: number, data: Float32Array) {
+  gl.texSubImage2D(
+    gl.TEXTURE_2D,
+    0,                      // mip level
+    xoff,                   // xoffset
+    yoff,                   // yoffset
+    width,                  // width
+    height,                 // height
+    gl.DEPTH_COMPONENT,     // format
+    gl.FLOAT,               // type
+    data
+  );
+}

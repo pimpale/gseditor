@@ -1,13 +1,13 @@
 import React from "react";
-import { createShader, createProgram, createTexture, createR32FTexture, createRGBA32FTexture } from '../utils/webgl';
+import { createShader, createProgram, createTexture, createRGBA32FTexture, createDepth32FTexture, } from '../utils/webgl';
 import { Camera, TrackballCamera, } from '../utils/camera';
 import { mat4, quat } from 'gl-matrix';
-import { deg2rad } from "../utils/math";
+import { arrayMax, deg2rad } from "../utils/math";
 import { GaussianScene, loadPly } from "./gaussian_renderer_utils/sceneLoader";
 import Form from 'react-bootstrap/Form';
 import { genPlane } from "../utils/uvplane";
 import { Vertex } from "../utils/vertex";
-import { polyline } from "../utils/polyline";
+import { polyline, polyline_facing_point } from "../utils/polyline";
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -169,7 +169,7 @@ in vec2 xy;
 in vec2 pixf;
 
 layout(location=0) out vec4 fragColor;
-layout(location=1) out vec4 fragDepth;
+layout(location=1) out vec4 fragInvDepth;
 
 vec3 depth_palette(float x) { 
     x = min(1., x);
@@ -201,7 +201,7 @@ void main() {
 
     // Eq. (3) from 3D Gaussian splatting paper.
     fragColor = vec4(col * alpha, alpha);
-    fragDepth = vec4(vec3(depth) * alpha, alpha);
+    fragInvDepth = vec4(vec3(1.0/depth), 1.0);
 }`;
 
 
@@ -276,8 +276,8 @@ class GaussianRendererEngine {
   private ysize: number;
 
   public fbo: WebGLFramebuffer;
-  private col_tex: WebGLTexture;
-  private depth_tex: WebGLTexture;
+  public col_tex: WebGLTexture;
+  public inv_depth_tex: WebGLTexture;
 
   public get_xsize = () => this.xsize;
   public get_ysize = () => this.ysize;
@@ -344,12 +344,12 @@ class GaussianRendererEngine {
       this.col_tex, // the texture to attach
       0 // the mipmap level (we don't want mipmapping, so we set to 0)
     );
-    this.depth_tex = createRGBA32FTexture(this.gl, this.xsize, this.ysize, new Float32Array(this.xsize * this.ysize * 4))!;
+    this.inv_depth_tex = createRGBA32FTexture(this.gl, this.xsize, this.ysize, new Float32Array(this.xsize * this.ysize * 4))!;
     this.gl.framebufferTexture2D(
       this.gl.FRAMEBUFFER, // will bind as a framebuffer
       this.gl.COLOR_ATTACHMENT1, // Attaches the texture to the framebuffer's depth buffer. 
       this.gl.TEXTURE_2D, // we have a 2d texture
-      this.depth_tex, // the texture to attach
+      this.inv_depth_tex, // the texture to attach
       0 // the mipmap level (we don't want mipmapping, so we set to 0)
     );
 
@@ -450,7 +450,7 @@ class GaussianRendererEngine {
     this.sortWorker.terminate();
     this.gl.deleteFramebuffer(this.fbo);
     this.gl.deleteTexture(this.col_tex);
-    this.gl.deleteTexture(this.depth_tex);
+    this.gl.deleteTexture(this.inv_depth_tex);
     this.gl.deleteProgram(this.program);
     this.gl.deleteBuffer(this.buffers.color);
     this.gl.deleteBuffer(this.buffers.center);
@@ -467,26 +467,31 @@ const overlay_vs = `#version 300 es
 layout(location=0) in vec3 a_position;
 layout(location=1) in vec3 a_color;
 
+uniform mat4 u_view;
 uniform mat4 u_view_proj;
 
 out vec3 v_color;
+out float v_depth;
 
 void main() {
-  gl_Position = u_view_proj * vec4(a_position, 1);
+  vec4 pos = u_view * vec4(a_position, 1);
+  v_depth = pos.z/pos.w;
   v_color = a_color;
+  gl_Position = u_view_proj * vec4(a_position, 1);
 }`
 
 const overlay_fs = `#version 300 es
 precision highp float;
 
 in vec3 v_color;
+in float v_depth;
 
 layout(location = 0) out vec4 outColor;
-layout(location = 1) out vec4 depth;
+layout(location = 1) out vec4 outInvDepth;
 
 void main() {
   outColor = vec4(v_color, 1);
-  depth = vec4(vec3(gl_FragCoord.z), 1);
+  outInvDepth = vec4(vec3(1.0/v_depth), 1);
 }`;
 
 type DrawableObject = {
@@ -501,11 +506,17 @@ class OverlayEngine {
   private positionBuffer: WebGLBuffer;
   private colorBuffer: WebGLBuffer;
 
+  private viewLoc: WebGLUniformLocation;
   private viewProjLoc: WebGLUniformLocation;
 
+
   public fbo: WebGLFramebuffer;
-  private col_tex: WebGLTexture;
-  private depth_tex: WebGLTexture;
+  public col_tex: WebGLTexture;
+  // this is the depth we want to use as input for compositing
+  public inv_depth_tex: WebGLTexture;
+  // this is used internally by webgl and has no blending (used for depth testing)
+  private webgl_depth_tex: WebGLTexture;
+
 
   private xsize: number;
   private ysize: number;
@@ -542,6 +553,7 @@ class OverlayEngine {
     this.positionBuffer = setupAttributeBuffer('a_position', 3);
     this.colorBuffer = setupAttributeBuffer('a_color', 3);
 
+    this.viewLoc = this.gl.getUniformLocation(this.program, 'u_view')!;
     this.viewProjLoc = this.gl.getUniformLocation(this.program, 'u_view_proj')!;
 
     this.xsize = this.gl.canvas.width;
@@ -561,15 +573,22 @@ class OverlayEngine {
       this.col_tex, // the texture to attach
       0 // the mipmap level (we don't want mipmapping, so we set to 0)
     );
-    this.depth_tex = createRGBA32FTexture(this.gl, this.xsize, this.ysize, new Float32Array(this.xsize * this.ysize * 4))!;
+    this.inv_depth_tex = createRGBA32FTexture(this.gl, this.xsize, this.ysize, new Float32Array(this.xsize * this.ysize * 4))!;
     this.gl.framebufferTexture2D(
       this.gl.FRAMEBUFFER, // will bind as a framebuffer
-      this.gl.COLOR_ATTACHMENT1, // Attaches the texture to the framebuffer's depth buffer. 
+      this.gl.COLOR_ATTACHMENT1, // Attaches the texture to the framebuffer's color buffer. 
       this.gl.TEXTURE_2D, // we have a 2d texture
-      this.depth_tex, // the texture to attach
+      this.inv_depth_tex, // the texture to attach
       0 // the mipmap level (we don't want mipmapping, so we set to 0)
     );
-
+    this.webgl_depth_tex = createDepth32FTexture(this.gl, this.xsize, this.ysize, new Float32Array(this.xsize * this.ysize))!;
+    this.gl.framebufferTexture2D(
+      this.gl.FRAMEBUFFER, // will bind as a framebuffer
+      this.gl.DEPTH_ATTACHMENT, // Attaches the texture to the framebuffer's depth buffer. 
+      this.gl.TEXTURE_2D, // we have a 2d texture
+      this.webgl_depth_tex, // the texture to attach
+      0 // the mipmap level (we don't want mipmapping, so we set to 0)
+    );
   }
 
   // updates the position and color buffers
@@ -582,7 +601,6 @@ class OverlayEngine {
     for (const obj of this.objects) {
       for (const vertex of obj.vertexes) {
         positions.set(vertex.position, offset * 3);
-        console.log(vertex.color);
         colors.set(vertex.color, offset * 3);
         offset += 1;
       }
@@ -602,12 +620,13 @@ class OverlayEngine {
   }
 
   render = (camera: Camera) => {
-    this.gl.enable(this.gl.DEPTH_TEST)
     this.gl.disable(this.gl.BLEND);
+    this.gl.enable(this.gl.DEPTH_TEST)
 
     this.gl.useProgram(this.program);
 
-    this.gl.uniformMatrix4fv(this.viewProjLoc, false, camera.viewProjMatrix(this.xsize, this.ysize));
+    this.gl.uniformMatrix4fv(this.viewLoc, false, convertViewMatrixTargetCoordinateSystem(camera.viewMatrix()));
+    this.gl.uniformMatrix4fv(this.viewProjLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(camera.viewProjMatrix(this.xsize, this.ysize)));
 
     this.gl.bindVertexArray(this.vao);
 
@@ -620,7 +639,129 @@ class OverlayEngine {
   }
 }
 
+const QUAD_BUFFER = new Float32Array(genPlane(1, 1).flatMap(v => [v[0], v[1]]));
 
+
+
+const compositor_vs = `#version 300 es
+in vec2 a_position;
+out vec2 v_texCoord;
+
+void main() {
+  v_texCoord = a_position;
+
+  // convert from 0->1 to 0->2
+  // convert from 0->2 to -1->+1 (clip space)
+  vec2 clipSpace = (a_position * 2.0) - 1.0;
+
+  gl_Position = vec4(clipSpace, 0, 1);
+}`
+
+const compositor_fs = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+// texture 0
+uniform sampler2D u_render_tex0;
+uniform sampler2D u_inv_depth_tex0;
+// texture 1
+uniform sampler2D u_render_tex1;
+uniform sampler2D u_inv_depth_tex1;
+
+in vec2 v_texCoord;
+out vec4 v_outColor;
+
+void main() {
+  float inv_depth0 = texture(u_inv_depth_tex0, v_texCoord).r;
+  float inv_depth1 = texture(u_inv_depth_tex1, v_texCoord).r;
+
+  if (inv_depth0 > inv_depth1) {
+    v_outColor = texture(u_render_tex0, v_texCoord);
+  } else {
+    v_outColor = texture(u_render_tex1, v_texCoord);
+  }
+  // v_outColor = vec4(vec3(max(depth0-depth1, 0.0)), 1.0);
+}`;
+
+
+// Always draws to the canvas
+class Compositor {
+  private gl: WebGL2RenderingContext;
+  private program: WebGLProgram;
+
+  private vao: WebGLVertexArrayObject;
+
+  private positionBuffer: WebGLBuffer;
+
+  private renderTex0Loc: WebGLUniformLocation;
+  private invDepthTex0Loc: WebGLUniformLocation;
+  private renderTex1Loc: WebGLUniformLocation;
+  private invDepthTex1Loc: WebGLUniformLocation;
+
+  private xsize: number;
+  private ysize: number;
+
+  constructor(gl: WebGL2RenderingContext) {
+    this.gl = gl;
+    this.program = createProgram(
+      this.gl,
+      [
+        createShader(this.gl, this.gl.VERTEX_SHADER, compositor_vs),
+        createShader(this.gl, this.gl.FRAGMENT_SHADER, compositor_fs),
+      ]
+    )!;
+    this.gl.useProgram(this.program);
+
+    const setupAttributeBuffer = (name: string, components: number) => {
+      const location = this.gl.getAttribLocation(this.program, name)
+      const buffer = this.gl.createBuffer()!
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
+      this.gl.enableVertexAttribArray(location)
+      this.gl.vertexAttribPointer(location, components, this.gl.FLOAT, false, 0, 0)
+      return buffer
+    }
+
+    this.vao = this.gl.createVertexArray()!;
+    this.gl.bindVertexArray(this.vao);
+
+    this.positionBuffer = setupAttributeBuffer('a_position', 2);
+    gl.bufferData(gl.ARRAY_BUFFER, QUAD_BUFFER, gl.STATIC_DRAW);
+
+    this.renderTex0Loc = this.gl.getUniformLocation(this.program, 'u_render_tex0')!;
+    this.invDepthTex0Loc = this.gl.getUniformLocation(this.program, 'u_inv_depth_tex0')!;
+    this.renderTex1Loc = this.gl.getUniformLocation(this.program, 'u_render_tex1')!;
+    this.invDepthTex1Loc = this.gl.getUniformLocation(this.program, 'u_inv_depth_tex1')!;
+
+    this.xsize = this.gl.canvas.width;
+    this.ysize = this.gl.canvas.height;
+  }
+
+  render = (renderTex0: WebGLTexture, invDepthTex0: WebGLTexture, renderTex1: WebGLTexture, invDepthTex1: WebGLTexture) => {
+    this.gl.useProgram(this.program);
+
+    this.gl.bindVertexArray(this.vao);
+
+    this.gl.viewport(0, 0, this.xsize, this.ysize);
+
+    this.gl.uniform1i(this.renderTex0Loc, 0);
+    this.gl.uniform1i(this.invDepthTex0Loc, 1);
+    this.gl.uniform1i(this.renderTex1Loc, 2);
+    this.gl.uniform1i(this.invDepthTex1Loc, 3);
+
+    this.gl.activeTexture(this.gl.TEXTURE0);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, renderTex0);
+    this.gl.activeTexture(this.gl.TEXTURE1);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, invDepthTex0);
+    this.gl.activeTexture(this.gl.TEXTURE2);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, renderTex1);
+    this.gl.activeTexture(this.gl.TEXTURE3);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, invDepthTex1);
+
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+    this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
+  }
+
+}
 
 
 const viz_vs = `#version 300 es
@@ -648,7 +789,7 @@ in vec2 v_texCoord;
 out vec4 v_outColor;
 
 void main() {
-  v_outColor = texture(u_render_tex, vec2(v_texCoord.x, v_texCoord.y));
+  v_outColor = vec4(texture(u_render_tex, v_texCoord).rgb, 1.0);
 }`;
 
 
@@ -691,6 +832,8 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
   private gsRendererEngine!: GaussianRendererEngine;
   // renders triangles
   private overlayEngine!: OverlayEngine;
+  // composits to canvas
+  private compositor!: Compositor;
 
   private requestID!: number;
 
@@ -712,26 +855,41 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
 
     this.gsRendererEngine = new GaussianRendererEngine(this.gl);
     this.overlayEngine = new OverlayEngine(this.gl);
+    this.compositor = new Compositor(this.gl);
 
+    let circ_r2 = (theta: number): [number, number, number] => {
+      return [2 * Math.cos(theta), 0, 2 * Math.sin(theta)];
+    }
 
     this.overlayEngine.addObject({
-      vertexes: polyline(
+      vertexes: polyline_facing_point(
         // points in the line
-        [[0, 0, 0],
-        [1, 1, 0],
-        [1, 0, 0],
-        [0, 0, 0]],
-        // normals 
-        [[0, 0, 1],
-        [0, 0, 1],
-        [0, 0, 1],
-        [0, 0, 1]],
+        [
+          circ_r2(0 / 6 * 2 * Math.PI),
+          circ_r2(1 / 6 * 2 * Math.PI),
+          circ_r2(2 / 6 * 2 * Math.PI),
+          circ_r2(3 / 6 * 2 * Math.PI),
+          circ_r2(4 / 6 * 2 * Math.PI),
+          circ_r2(5 / 6 * 2 * Math.PI),
+        ],
         // width
-        [0.1, 0.1, 0.1, 0.1],
+        [
+          0.1,
+          0.1,
+          0.1,
+          0.1,
+          0.1,
+          0.1,
+        ],
         // colors
-        [[1, 0, 0],
-        [0, 1, 0],
-        [0, 0, 1]],
+        [
+          [1, 0, 0],
+          [0, 1, 0],
+          [0, 0, 1],
+          [1, 0, 0],
+          [0, 1, 0],
+        ],
+        [0, 0, 0]
       )
     });
 
@@ -750,12 +908,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     // setup a full canvas clip space quad
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array(genPlane(1, 1).flatMap(v => [v[0], v[1]])),
-      gl.STATIC_DRAW
-    );
+    gl.bufferData(gl.ARRAY_BUFFER, QUAD_BUFFER, gl.STATIC_DRAW);
 
     // setup viz program
     const viz_program = createProgram(
@@ -891,6 +1044,15 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     // visualize textures
     this.visualizeTexture(this.overlayColorVizData, overlay_color_tex_data);
     this.visualizeTexture(this.overlayDepthVizData, this.convertTex(overlay_depth_tex_data));
+
+
+    // composite
+    this.compositor.render(
+      this.gsRendererEngine.col_tex,
+      this.gsRendererEngine.inv_depth_tex,
+      this.overlayEngine.col_tex,
+      this.overlayEngine.inv_depth_tex
+    );
 
     this.requestID = window.requestAnimationFrame(this.animationLoop);
   }

@@ -20,3 +20,19 @@ export function softmax(logits: number[]): number[] {
 export function deg2rad(deg: number): number {
   return deg * Math.PI / 180;
 }
+
+export function arrayMin(arr: number[]| Float32Array): number {
+  let min = Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    min = Math.min(min, arr[i]);
+  }
+  return min;
+}
+
+export function arrayMax(arr: number[]| Float32Array): number {
+  let max = -Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    max = Math.max(max, arr[i]);
+  }
+  return max;
+}

@@ -73,6 +73,21 @@
 import {vec3} from 'gl-matrix';
 import { Vertex } from './vertex';
 
+export function polyline_facing_point(
+    points: vec3[],
+    width: number[],
+    colors: vec3[],
+    reference_point: vec3,
+): Vertex[] {
+    // compute the direction from each point to the reference point, this is the normal
+    const normals = [];
+    for (let i = 0; i < points.length; i++) {
+        normals.push(vec3.normalize(vec3.create(), vec3.subtract(vec3.create(), reference_point, points[i])));
+    }
+    return polyline(points, normals, width, colors);
+} 
+
+
 export function polyline(
     points: vec3[],
     normals: vec3[],
@@ -140,6 +155,5 @@ export function polyline(
             color: colors[i],
         });
     }
-    console.log(vertexes)
     return vertexes;
 }
