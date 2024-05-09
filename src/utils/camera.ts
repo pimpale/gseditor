@@ -101,6 +101,7 @@ export class TrackballCamera implements Camera {
 
   handleScroll = (e: WheelEvent) => {
     this.offsetRadius += e.deltaY / 50;
+    e.preventDefault();
   }
 
   handleMouseMove = (e: MouseEvent) => {
