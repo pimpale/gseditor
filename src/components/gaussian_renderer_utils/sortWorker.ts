@@ -11,7 +11,7 @@ type GaussianContextualizedObject = {
 type SortWorkerInput = {
     viewMatrix: Float32Array
     sortingAlgorithm: string
-    gaussian_objects: Map<number, { transform: mat4, object: GaussianObjectInput }>
+    sceneGraph: Map<number, { transform: mat4, object: GaussianObjectInput }>
 }
 
 // a processed input object with object ids
@@ -28,13 +28,14 @@ export type ProcessedGaussianScene = {
 }
 
 onmessage = (event: MessageEvent<SortWorkerInput>) => {
+
     console.log("[Worker] Received message")
 
-    const { gaussian_objects, viewMatrix, sortingAlgorithm } = event.data
-
+    const { sceneGraph, viewMatrix, sortingAlgorithm } = event.data
+    
     const start = performance.now()
 
-    const count = [...gaussian_objects.values()].reduce((a, b) => a + b.object.count, 0)
+    const count = [...sceneGraph.values()].reduce((a, b) => a + b.object.count, 0)
 
     // create a merged object for fast lookup
     const gaussians: ProcessedGaussianScene = {
@@ -50,7 +51,7 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
     }
 
     let offset = 0;
-    for (const [key, value] of gaussian_objects.entries()) {
+    for (const [key, value] of sceneGraph.entries()) {
         const id = key
         const g = value.object;
         gaussians.sceneMin = gaussians.sceneMin.map((v, j) => Math.min(v, g.sceneMin[j]))

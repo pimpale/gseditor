@@ -9,6 +9,10 @@ import { genPlane } from "../utils/uvplane";
 import { Vertex } from "../utils/vertex";
 import { polyline, polyline_facing_point } from "../utils/polyline";
 import { ProcessedGaussianScene } from "./gaussian_renderer_utils/sortWorker";
+import assert from "../utils/assert";
+
+const QUAD_BUFFER = new Float32Array(genPlane(1, 1).flatMap(v => [v[0], v[1]]));
+
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -24,7 +28,7 @@ layout(location=1) in vec3 a_col;
 layout(location=2) in float a_opacity;
 layout(location=3) in vec3 a_covA;
 layout(location=4) in vec3 a_covB;
-layout(location=5) in uint a_objId
+layout(location=5) in uint a_objId;
 
 uniform float W;
 uniform float H;
@@ -44,7 +48,7 @@ out float scale_modif;
 out vec4 con_o;
 out vec2 xy;
 out vec2 pixf;
-out uint objId
+flat out uint objId;
 
 vec3 computeCov2D(vec3 mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, float[6] cov3D, mat4 viewmatrix) {
     vec4 t = viewmatrix * vec4(mean, 1.0);
@@ -154,7 +158,7 @@ void main() {
     xy = point_image;
     pixf = screen_pos;
     depth = p_view.z;
-    objId = a_objId
+    objId = a_objId;
 
     // (Webgl-specific) Convert from screen-space to clip-space
     vec2 clip_pos = screen_pos / vec2(W, H) * 2. - 1.;
@@ -164,7 +168,6 @@ void main() {
 
 const gsengine_fs = `#version 300 es
 precision highp float;
-precision highp uint;
 
 in vec3 col;
 in float scale_modif;
@@ -172,11 +175,11 @@ in float depth;
 in vec4 con_o;
 in vec2 xy;
 in vec2 pixf;
-in uint objId
+flat in uint objId;
 
 layout(location=0) out vec4 fragColor;
 layout(location=1) out vec4 fragInvDepth;
-layout(location=2) out uint fragObjId
+layout(location=2) out uint fragObjId;
 
 vec3 depth_palette(float x) { 
     x = min(1., x);
@@ -210,6 +213,38 @@ void main() {
     fragColor = vec4(col * alpha, alpha);
     fragInvDepth = vec4(vec3(1.0/depth) * alpha, alpha);
     fragObjId = objId;
+}`;
+
+
+
+const gsengine_clear_vs = `#version 300 es
+in vec2 a_position;
+out vec2 v_texCoord;
+
+void main() {
+  v_texCoord = a_position;
+
+  // convert from 0->1 to 0->2
+  // convert from 0->2 to -1->+1 (clip space)
+  vec2 clipSpace = (a_position * 2.0) - 1.0;
+
+  gl_Position = vec4(clipSpace, 0, 1);
+}`
+
+const gsengine_clear_fs = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+
+layout(location=0) out vec4 fragColor;
+layout(location=1) out vec4 fragInvDepth;
+layout(location=2) out uint fragObjId;
+
+
+void main() {
+  fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+  fragInvDepth = vec4(0.0, 0.0, 0.0, 0.0);
+  fragObjId = 0u;
 }`;
 
 
@@ -248,6 +283,7 @@ class GaussianRendererEngine {
   // canvas to render to
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
+  private clear_program: WebGLProgram;
 
   // worker
   private sortWorker: Worker;
@@ -276,14 +312,19 @@ class GaussianRendererEngine {
 
   // vertex array object
   private vao: WebGLVertexArrayObject;
+  private clear_vao: WebGLVertexArrayObject;
+
   // buffers
-  private buffers!: {
+  private buffers: {
     color: WebGLBuffer,
     center: WebGLBuffer,
     opacity: WebGLBuffer,
     covA: WebGLBuffer,
     covB: WebGLBuffer,
     objId: WebGLBuffer,
+  }
+  private clear_buffers: {
+    position: WebGLBuffer
   }
 
   private xsize: number;
@@ -308,13 +349,19 @@ class GaussianRendererEngine {
     )!;
     this.gl.useProgram(this.program);
 
-    const setupAttributeBuffer = (name: string, kind: "float" | "uint", components: number) => {
-      let ptr_type = kind === "float" ? this.gl.FLOAT : this.gl.UNSIGNED_INT;
+    const setupAttributeBuffer = (name: string, ptr_type: number, components: number) => {
       const location = this.gl.getAttribLocation(this.program, name)
-      const buffer = this.gl.createBuffer()!
+      const buffer = this.gl.createBuffer()
+      assert(buffer !== null, "Failed to create buffer")
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
       this.gl.enableVertexAttribArray(location)
-      this.gl.vertexAttribPointer(location, components, ptr_type, false, 0, 0)
+      if (ptr_type === this.gl.UNSIGNED_INT) {
+        this.gl.vertexAttribIPointer(location, components, ptr_type, 0, 0)
+      } else if (ptr_type === this.gl.FLOAT) {
+        this.gl.vertexAttribPointer(location, components, ptr_type, false, 0, 0)
+      } else {
+        throw Error("ptr_type not supported")
+      }
       this.gl.vertexAttribDivisor(location, 1)
       return buffer
     }
@@ -324,12 +371,12 @@ class GaussianRendererEngine {
 
     // Create attribute buffers
     this.buffers = {
-      color: setupAttributeBuffer('a_col', "float", 3),
-      center: setupAttributeBuffer('a_center', "float", 3),
-      opacity: setupAttributeBuffer('a_opacity', "float", 1),
-      covA: setupAttributeBuffer('a_covA', "float", 3),
-      covB: setupAttributeBuffer('a_covB', "float", 3),
-      objId: setupAttributeBuffer('a_objId', "uint", 1),
+      color: setupAttributeBuffer('a_col', this.gl.FLOAT, 3),
+      center: setupAttributeBuffer('a_center', this.gl.FLOAT, 3),
+      opacity: setupAttributeBuffer('a_opacity', this.gl.FLOAT, 1),
+      covA: setupAttributeBuffer('a_covA', this.gl.FLOAT, 3),
+      covB: setupAttributeBuffer('a_covB', this.gl.FLOAT, 3),
+      objId: setupAttributeBuffer('a_objId', this.gl.UNSIGNED_INT, 1),
     }
 
     this.wLoc = this.gl.getUniformLocation(this.program, 'W')!;
@@ -374,9 +421,39 @@ class GaussianRendererEngine {
       this.gl.FRAMEBUFFER, // will bind as a framebuffer
       this.gl.COLOR_ATTACHMENT2, // Attaches the texture to the framebuffer's color buffer. 
       this.gl.TEXTURE_2D, // we have a 2d texture
-      this.inv_depth_tex, // the texture to attach
+      this.obj_id_tex, // the texture to attach
       0 // the mipmap level (we don't want mipmapping, so we set to 0)      
     )
+
+    // Now we set up the clear program
+    this.clear_program = createProgram(
+      this.gl,
+      [
+        createShader(this.gl, this.gl.VERTEX_SHADER, gsengine_clear_vs),
+        createShader(this.gl, this.gl.FRAGMENT_SHADER, gsengine_clear_fs),
+      ]
+    )!;
+    this.gl.useProgram(this.clear_program);
+
+    const setupClearAttributeBuffer = (name: string, components: number) => {
+      const location = this.gl.getAttribLocation(this.clear_program, name)
+      const buffer = this.gl.createBuffer()!
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
+      this.gl.enableVertexAttribArray(location)
+      this.gl.vertexAttribPointer(location, components, this.gl.FLOAT, false, 0, 0)
+      return buffer
+    }
+
+    this.clear_vao = this.gl.createVertexArray()!;
+    this.gl.bindVertexArray(this.clear_vao);
+
+    this.clear_buffers =  {
+      position: setupClearAttributeBuffer('a_position', 2)
+    }
+    // setup a full canvas clip space quad
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.clear_buffers.position)
+    gl.bufferData(this.gl.ARRAY_BUFFER, QUAD_BUFFER, this.gl.STATIC_DRAW);
+
 
     // init sort worker
     this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/sortWorker.ts', import.meta.url), { type: 'module' });
@@ -433,16 +510,30 @@ class GaussianRendererEngine {
   }
 
   render = (camera: Camera) => {
-    this.gl.useProgram(this.program);
-
-    // settings
-    this.gl.disable(this.gl.DEPTH_TEST)
-    this.gl.enable(this.gl.BLEND);
-    this.gl.blendFunc(this.gl.ONE_MINUS_DST_ALPHA, this.gl.ONE)
-
     // bind the framebuffer
     this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.fbo);
     this.gl.viewport(0, 0, this.xsize, this.ysize);
+
+
+    // clear frame buffer
+    this.gl.useProgram(this.clear_program);
+
+    // clear framebuffer settings
+    this.gl.disable(this.gl.DEPTH_TEST)
+    this.gl.disable(this.gl.BLEND);
+
+    // draw quad
+    this.gl.bindVertexArray(this.clear_vao);
+    this.gl.drawBuffers([this.gl.COLOR_ATTACHMENT0, this.gl.COLOR_ATTACHMENT1, this.gl.COLOR_ATTACHMENT2]);
+    this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
+
+    // draw gaussians
+    this.gl.useProgram(this.program);
+
+    // gaussian settings
+    this.gl.disable(this.gl.DEPTH_TEST)
+    this.gl.enable(this.gl.BLEND);
+    this.gl.blendFunc(this.gl.ONE_MINUS_DST_ALPHA, this.gl.ONE)
 
     // bind the vao (vertex buffers)
     this.gl.bindVertexArray(this.vao);
@@ -471,7 +562,6 @@ class GaussianRendererEngine {
       this.gl.uniform3fv(this.boxMinLoc, this.loadedSortedScene.sceneMin)
       this.gl.uniform3fv(this.boxMaxLoc, this.loadedSortedScene.sceneMax)
       // draw triangles
-      this.gl.clear(this.gl.DEPTH_BUFFER_BIT | this.gl.COLOR_BUFFER_BIT);
       this.gl.drawBuffers([this.gl.COLOR_ATTACHMENT0, this.gl.COLOR_ATTACHMENT1, this.gl.COLOR_ATTACHMENT2]);
       this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, this.loadedSortedScene.count);
     }
@@ -681,9 +771,6 @@ class OverlayEngine {
     this.gl.drawArrays(this.gl.TRIANGLES, 0, this.n_vertexes);
   }
 }
-
-const QUAD_BUFFER = new Float32Array(genPlane(1, 1).flatMap(v => [v[0], v[1]]));
-
 
 
 const compositor_vs = `#version 300 es
@@ -1038,7 +1125,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     const ply_file = this.fileInput.current?.files?.[0];
     if (ply_file) {
       this.gsRendererEngine.addObject(
-        Math.random()*100,
+        Math.random() * 100,
         mat4.identity(mat4.create()),
         loadPly(await ply_file.arrayBuffer()),
         this.camera

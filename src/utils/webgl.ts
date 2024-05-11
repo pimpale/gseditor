@@ -21,7 +21,7 @@ export function createProgram(gl: WebGL2RenderingContext, shaders: WebGLShader[]
     for (const shader of shaders) {
       const shaderSuccess = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
       if (!shaderSuccess) {
-        console.log(gl.getShaderInfoLog(shader));
+        throw Error(gl.getShaderInfoLog(shader)!);
       }
       gl.deleteShader(shader);
     }
