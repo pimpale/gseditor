@@ -1,6 +1,7 @@
 import { mat3, vec3, vec4 } from 'gl-matrix';
 
-export type GaussianScene = {
+// a raw input object
+export type GaussianObjectInput = {
     count: number,
     // array of size 3 containing the minimum pos in scene
     sceneMin: Float32Array,
@@ -21,7 +22,7 @@ export type GaussianScene = {
 
 // Load all gaussian data from a point-cloud file
 // Original C++ implementation: https://gitlab.inria.fr/sibr/sibr_core/-/blob/gaussian_code_release_union/src/projects/gaussianviewer/renderer/GaussianView.cpp#L70
-export function loadPly(content: ArrayBuffer): GaussianScene {
+export function loadPly(content: ArrayBuffer): GaussianObjectInput {
     // Read header
     const start = performance.now()
     const contentStart = new TextDecoder('utf-8').decode(content.slice(0, 2000))

@@ -1,13 +1,14 @@
 import React from "react";
-import { createShader, createProgram, createTexture, createRGBA32FTexture, createDepth32FTexture, } from '../utils/webgl';
+import { createShader, createProgram, createTexture, createRGBA32FTexture, createDepth32FTexture, createR32UITexture, } from '../utils/webgl';
 import { Camera, TrackballCamera, } from '../utils/camera';
 import { mat4, quat } from 'gl-matrix';
 import { arrayMax, deg2rad } from "../utils/math";
-import { GaussianScene, loadPly } from "./gaussian_renderer_utils/sceneLoader";
+import { GaussianObjectInput, loadPly } from "./gaussian_renderer_utils/sceneLoader";
 import Form from 'react-bootstrap/Form';
 import { genPlane } from "../utils/uvplane";
 import { Vertex } from "../utils/vertex";
 import { polyline, polyline_facing_point } from "../utils/polyline";
+import { ProcessedGaussianScene } from "./gaussian_renderer_utils/sortWorker";
 
 type GaussianRendererProps = {
   style?: React.CSSProperties,
@@ -23,6 +24,7 @@ layout(location=1) in vec3 a_col;
 layout(location=2) in float a_opacity;
 layout(location=3) in vec3 a_covA;
 layout(location=4) in vec3 a_covB;
+layout(location=5) in uint a_objId
 
 uniform float W;
 uniform float H;
@@ -42,6 +44,7 @@ out float scale_modif;
 out vec4 con_o;
 out vec2 xy;
 out vec2 pixf;
+out uint objId
 
 vec3 computeCov2D(vec3 mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, float[6] cov3D, mat4 viewmatrix) {
     vec4 t = viewmatrix * vec4(mean, 1.0);
@@ -151,6 +154,7 @@ void main() {
     xy = point_image;
     pixf = screen_pos;
     depth = p_view.z;
+    objId = a_objId
 
     // (Webgl-specific) Convert from screen-space to clip-space
     vec2 clip_pos = screen_pos / vec2(W, H) * 2. - 1.;
@@ -160,6 +164,7 @@ void main() {
 
 const gsengine_fs = `#version 300 es
 precision highp float;
+precision highp uint;
 
 in vec3 col;
 in float scale_modif;
@@ -167,9 +172,11 @@ in float depth;
 in vec4 con_o;
 in vec2 xy;
 in vec2 pixf;
+in uint objId
 
 layout(location=0) out vec4 fragColor;
 layout(location=1) out vec4 fragInvDepth;
+layout(location=2) out uint fragObjId
 
 vec3 depth_palette(float x) { 
     x = min(1., x);
@@ -202,6 +209,7 @@ void main() {
     // Eq. (3) from 3D Gaussian splatting paper.
     fragColor = vec4(col * alpha, alpha);
     fragInvDepth = vec4(vec3(1.0/depth) * alpha, alpha);
+    fragObjId = objId;
 }`;
 
 
@@ -234,7 +242,9 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
   return viewProjMatrix;
 }
 
+
 class GaussianRendererEngine {
+
   // canvas to render to
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
@@ -245,8 +255,11 @@ class GaussianRendererEngine {
   private lastSortedViewProjMatrix: mat4 | null = null;
 
   // ply data to render
-  private plyData: GaussianScene | null = null;
-  private loadedSortedScene: GaussianScene | null = null;
+  private sceneGraph: Map<number, {
+    transform: mat4,
+    object: GaussianObjectInput
+  }> = new Map();
+  private loadedSortedScene: ProcessedGaussianScene | null = null;
 
   // uniforms
   private wLoc: WebGLUniformLocation;
@@ -270,6 +283,7 @@ class GaussianRendererEngine {
     opacity: WebGLBuffer,
     covA: WebGLBuffer,
     covB: WebGLBuffer,
+    objId: WebGLBuffer,
   }
 
   private xsize: number;
@@ -278,6 +292,7 @@ class GaussianRendererEngine {
   public fbo: WebGLFramebuffer;
   public col_tex: WebGLTexture;
   public inv_depth_tex: WebGLTexture;
+  public obj_id_tex: WebGLTexture;
 
   public get_xsize = () => this.xsize;
   public get_ysize = () => this.ysize;
@@ -293,12 +308,13 @@ class GaussianRendererEngine {
     )!;
     this.gl.useProgram(this.program);
 
-    const setupAttributeBuffer = (name: string, components: number) => {
+    const setupAttributeBuffer = (name: string, kind: "float" | "uint", components: number) => {
+      let ptr_type = kind === "float" ? this.gl.FLOAT : this.gl.UNSIGNED_INT;
       const location = this.gl.getAttribLocation(this.program, name)
       const buffer = this.gl.createBuffer()!
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
       this.gl.enableVertexAttribArray(location)
-      this.gl.vertexAttribPointer(location, components, this.gl.FLOAT, false, 0, 0)
+      this.gl.vertexAttribPointer(location, components, ptr_type, false, 0, 0)
       this.gl.vertexAttribDivisor(location, 1)
       return buffer
     }
@@ -308,11 +324,12 @@ class GaussianRendererEngine {
 
     // Create attribute buffers
     this.buffers = {
-      color: setupAttributeBuffer('a_col', 3),
-      center: setupAttributeBuffer('a_center', 3),
-      opacity: setupAttributeBuffer('a_opacity', 1),
-      covA: setupAttributeBuffer('a_covA', 3),
-      covB: setupAttributeBuffer('a_covB', 3),
+      color: setupAttributeBuffer('a_col', "float", 3),
+      center: setupAttributeBuffer('a_center', "float", 3),
+      opacity: setupAttributeBuffer('a_opacity', "float", 1),
+      covA: setupAttributeBuffer('a_covA', "float", 3),
+      covB: setupAttributeBuffer('a_covB', "float", 3),
+      objId: setupAttributeBuffer('a_objId', "uint", 1),
     }
 
     this.wLoc = this.gl.getUniformLocation(this.program, 'W')!;
@@ -347,11 +364,19 @@ class GaussianRendererEngine {
     this.inv_depth_tex = createRGBA32FTexture(this.gl, this.xsize, this.ysize, new Float32Array(this.xsize * this.ysize * 4))!;
     this.gl.framebufferTexture2D(
       this.gl.FRAMEBUFFER, // will bind as a framebuffer
-      this.gl.COLOR_ATTACHMENT1, // Attaches the texture to the framebuffer's depth buffer. 
+      this.gl.COLOR_ATTACHMENT1, // Attaches the texture to the framebuffer's color buffer. 
       this.gl.TEXTURE_2D, // we have a 2d texture
       this.inv_depth_tex, // the texture to attach
       0 // the mipmap level (we don't want mipmapping, so we set to 0)
     );
+    this.obj_id_tex = createR32UITexture(this.gl, this.xsize, this.ysize)!;
+    this.gl.framebufferTexture2D(
+      this.gl.FRAMEBUFFER, // will bind as a framebuffer
+      this.gl.COLOR_ATTACHMENT2, // Attaches the texture to the framebuffer's color buffer. 
+      this.gl.TEXTURE_2D, // we have a 2d texture
+      this.inv_depth_tex, // the texture to attach
+      0 // the mipmap level (we don't want mipmapping, so we set to 0)      
+    )
 
     // init sort worker
     this.sortWorker = new Worker(new URL('../components/gaussian_renderer_utils/sortWorker.ts', import.meta.url), { type: 'module' });
@@ -361,24 +386,39 @@ class GaussianRendererEngine {
     }
   }
 
-  setScene = (data: GaussianScene, camera: Camera) => {
-    this.plyData = data;
+  addObject = (id: number, transform: mat4, object: GaussianObjectInput, camera: Camera) => {
+    this.sceneGraph.set(id, { transform, object });
+    this.doWorkerSort(camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height));
+  }
+
+  transformObject = (id: number, transform: mat4, camera: Camera) => {
+    const obj = this.sceneGraph.get(id);
+    if (obj === undefined) {
+      throw Error(`Object with id ${id} does not exist`)
+    }
+    obj.transform = transform;
+    this.doWorkerSort(camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height));
+  }
+
+  removeObject = (id: number, camera: Camera) => {
+    this.sceneGraph.delete(id);
     this.doWorkerSort(camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height));
   }
 
   doWorkerSort = (viewProjMatrix: mat4) => {
     this.sortWorkerBusy = true;
     this.lastSortedViewProjMatrix = viewProjMatrix;
+
     this.sortWorker.postMessage({
       viewMatrix: this.lastSortedViewProjMatrix,
       sortingAlgorithm: 'Array.sort',
-      gaussians: this.plyData
+      sceneGraph: this.sceneGraph
     });
   }
 
   // recieve ordered gaussian data from worker
-  recieveUpdatedGaussianData = (data: GaussianScene) => {
-    const updateBuffer = (buffer: WebGLBuffer, data: Float32Array) => {
+  recieveUpdatedGaussianData = (data: ProcessedGaussianScene) => {
+    const updateBuffer = (buffer: WebGLBuffer, data: Float32Array | Uint32Array) => {
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer)
       this.gl.bufferData(this.gl.ARRAY_BUFFER, data, this.gl.STATIC_DRAW)
     }
@@ -387,6 +427,7 @@ class GaussianRendererEngine {
     updateBuffer(this.buffers.opacity, data.opacities)
     updateBuffer(this.buffers.covA, data.cov3Da)
     updateBuffer(this.buffers.covB, data.cov3Db)
+    updateBuffer(this.buffers.objId, data.objectIds)
 
     this.loadedSortedScene = data;
   }
@@ -431,7 +472,7 @@ class GaussianRendererEngine {
       this.gl.uniform3fv(this.boxMaxLoc, this.loadedSortedScene.sceneMax)
       // draw triangles
       this.gl.clear(this.gl.DEPTH_BUFFER_BIT | this.gl.COLOR_BUFFER_BIT);
-      this.gl.drawBuffers([this.gl.COLOR_ATTACHMENT0, this.gl.COLOR_ATTACHMENT1]);
+      this.gl.drawBuffers([this.gl.COLOR_ATTACHMENT0, this.gl.COLOR_ATTACHMENT1, this.gl.COLOR_ATTACHMENT2]);
       this.gl.drawArraysInstanced(this.gl.TRIANGLE_STRIP, 0, 4, this.loadedSortedScene.count);
     }
   }
@@ -451,12 +492,14 @@ class GaussianRendererEngine {
     this.gl.deleteFramebuffer(this.fbo);
     this.gl.deleteTexture(this.col_tex);
     this.gl.deleteTexture(this.inv_depth_tex);
+    this.gl.deleteTexture(this.obj_id_tex);
     this.gl.deleteProgram(this.program);
     this.gl.deleteBuffer(this.buffers.color);
     this.gl.deleteBuffer(this.buffers.center);
     this.gl.deleteBuffer(this.buffers.opacity);
     this.gl.deleteBuffer(this.buffers.covA);
     this.gl.deleteBuffer(this.buffers.covB);
+    this.gl.deleteBuffer(this.buffers.objId);
   }
 }
 
@@ -680,7 +723,6 @@ void main() {
   } else {
     v_outColor = texture(u_render_tex1, v_texCoord);
   }
-  // v_outColor = vec4(vec3(max(depth0-depth1, 0.0)), 1.0);
 }`;
 
 
@@ -995,7 +1037,9 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
   handleFileInputChange = async () => {
     const ply_file = this.fileInput.current?.files?.[0];
     if (ply_file) {
-      this.gsRendererEngine.setScene(
+      this.gsRendererEngine.addObject(
+        Math.random()*100,
+        mat4.identity(mat4.create()),
         loadPly(await ply_file.arrayBuffer()),
         this.camera
       );
@@ -1066,6 +1110,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
         height={this.props.height}
         width={this.props.width}
       />
+      <br />
       <canvas
         style={this.props.style}
         className={this.props.className}

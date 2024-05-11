@@ -84,7 +84,7 @@ export class TrackballCamera implements Camera {
     // get normalized mouse x and y
     const q = {
       x: -2 * (e.clientX - client_cx) / trackballRadius,
-      y: 2 * (e.clientY - client_cy) / trackballRadius
+      y: -2 * (e.clientY - client_cy) / trackballRadius
     }
     return q;
   }

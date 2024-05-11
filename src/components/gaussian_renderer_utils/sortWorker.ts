@@ -1,33 +1,84 @@
+import { mat4 } from "gl-matrix"
 import assert from "../../utils/assert"
-import { GaussianScene } from "./sceneLoader"
+import { GaussianObjectInput } from "./sceneLoader"
+
+
+type GaussianContextualizedObject = {
+    id: number
+    obj: GaussianObjectInput,
+}
 
 type SortWorkerInput = {
     viewMatrix: Float32Array
     sortingAlgorithm: string
-    gaussians: GaussianScene
+    gaussian_objects: Map<number, { transform: mat4, object: GaussianObjectInput }>
+}
+
+// a processed input object with object ids
+export type ProcessedGaussianScene = {
+    count: number,
+    sceneMin: Float32Array,
+    sceneMax: Float32Array,
+    positions: Float32Array,
+    opacities: Float32Array,
+    colors: Float32Array,
+    cov3Da: Float32Array,
+    cov3Db: Float32Array,
+    objectIds: Uint32Array
 }
 
 onmessage = (event: MessageEvent<SortWorkerInput>) => {
     console.log("[Worker] Received message")
 
-    const { gaussians, viewMatrix, sortingAlgorithm } = event.data
+    const { gaussian_objects, viewMatrix, sortingAlgorithm } = event.data
 
     const start = performance.now()
 
-    // Sort the gaussians!
-    const depthIndex = sortGaussiansByDepth(gaussians, viewMatrix, sortingAlgorithm)
+    const count = [...gaussian_objects.values()].reduce((a, b) => a + b.object.count, 0)
 
-    // create a new object to store the sorted data
-    const data: GaussianScene = {
-        count: gaussians.count,
+    // create a merged object for fast lookup
+    const gaussians: ProcessedGaussianScene = {
+        count,
+        sceneMin: Float32Array.from([Infinity, Infinity, Infinity]),
+        sceneMax: Float32Array.from([-Infinity, -Infinity, -Infinity]),
+        colors: new Float32Array(count * 3),
+        positions: new Float32Array(count * 3),
+        opacities: new Float32Array(count),
+        cov3Da: new Float32Array(count * 3),
+        cov3Db: new Float32Array(count * 3),
+        objectIds: new Uint32Array(count),
+    }
+
+    let offset = 0;
+    for (const [key, value] of gaussian_objects.entries()) {
+        const id = key
+        const g = value.object;
+        gaussians.sceneMin = gaussians.sceneMin.map((v, j) => Math.min(v, g.sceneMin[j]))
+        gaussians.sceneMax = gaussians.sceneMax.map((v, j) => Math.max(v, g.sceneMax[j]))
+        gaussians.colors.set(g.colors, offset * 3)
+        gaussians.positions.set(g.positions, offset * 3)
+        gaussians.opacities.set(g.opacities, offset)
+        gaussians.cov3Da.set(g.cov3Da, offset * 3)
+        gaussians.cov3Db.set(g.cov3Db, offset * 3)
+        gaussians.objectIds.fill(id, offset, offset + g.count)
+        offset += g.count
+    }
+
+    // create an empty object to write to
+    const data: ProcessedGaussianScene = {
+        count,
         sceneMin: gaussians.sceneMin,
         sceneMax: gaussians.sceneMax,
-        colors: new Float32Array(gaussians.count * 3),
-        positions: new Float32Array(gaussians.count * 3),
-        opacities: new Float32Array(gaussians.count),
-        cov3Da: new Float32Array(gaussians.count * 3),
-        cov3Db: new Float32Array(gaussians.count * 3),
+        colors: new Float32Array(count * 3),
+        positions: new Float32Array(count * 3),
+        opacities: new Float32Array(count),
+        cov3Da: new Float32Array(count * 3),
+        cov3Db: new Float32Array(count * 3),
+        objectIds: new Uint32Array(count),
     }
+
+    // Sort the gaussians!
+    const depthIndex = sortGaussiansByDepth(gaussians.positions, viewMatrix, sortingAlgorithm)
 
     // Update arrays containing the data
     for (let j = 0; j < depthIndex.length; j++) {
@@ -55,29 +106,39 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
     }
 
     // Check that the arrays are the correct length
-    assert(data.cov3Da.length == 3*gaussians.count, "cov3Da count mismatch")
-    assert(data.cov3Db.length == 3*gaussians.count, "cov3Db count mismatch")
+    assert(data.cov3Da.length == 3 * gaussians.count, "cov3Da count mismatch")
+    assert(data.cov3Db.length == 3 * gaussians.count, "cov3Db count mismatch")
 
     const sortTime = `${((performance.now() - start) / 1000).toFixed(3)}s`
     console.log(`[Worker] Sorted ${gaussians.count} gaussians in ${sortTime}. Algorithm: ${sortingAlgorithm}`)
 
     postMessage({
         data, sortTime,
-    })
+    }, [
+        data.positions.buffer,
+        data.colors.buffer,
+        data.opacities.buffer,
+        data.cov3Da.buffer,
+        data.cov3Db.buffer,
+        data.objectIds.buffer,
+    ])
 
 }
 
 
-function sortGaussiansByDepth(gaussians: GaussianScene, viewMatrix: Float32Array, sortingAlgorithm: string): Uint32Array {
-    const calcDepth = (i: number) => gaussians.positions[i * 3] * viewMatrix[2] +
-        gaussians.positions[i * 3 + 1] * viewMatrix[6] +
-        gaussians.positions[i * 3 + 2] * viewMatrix[10]
 
-    const depthIndex = new Uint32Array(gaussians.count)
+function sortGaussiansByDepth(gaussian_positions: Float32Array, viewMatrix: Float32Array, sortingAlgorithm: string): Uint32Array {
+    const n_gaussians = gaussian_positions.length / 3
+
+    const calcDepth = (i: number) => gaussian_positions[i * 3] * viewMatrix[2] +
+        gaussian_positions[i * 3 + 1] * viewMatrix[6] +
+        gaussian_positions[i * 3 + 2] * viewMatrix[10]
+
+    const depthIndex = new Uint32Array(n_gaussians)
 
     // Default javascript sort [~0.9s]
     if (sortingAlgorithm == 'Array.sort') {
-        const indices = new Array(gaussians.count)
+        const indices = new Array(n_gaussians)
             .fill(0)
             .map((_, i) => ({
                 depth: calcDepth(i),
@@ -90,23 +151,23 @@ function sortGaussiansByDepth(gaussians: GaussianScene, viewMatrix: Float32Array
     }
     // Quick sort algorithm (Hoare partition scheme) [~0.4s]
     else if (sortingAlgorithm == 'quick sort') {
-        const depths = new Float32Array(gaussians.count)
+        const depths = new Float32Array(n_gaussians)
 
-        for (let i = 0; i < gaussians.count; i++) {
+        for (let i = 0; i < n_gaussians; i++) {
             depthIndex[i] = i
             depths[i] = calcDepth(i)
         }
 
-        quicksort(depths, depthIndex, 0, gaussians.count - 1)
+        quicksort(depths, depthIndex, 0, n_gaussians - 1)
     }
     // 16 bit single-pass counting sort [~0.3s]
     // https://github.com/antimatter15/splat
     else if (sortingAlgorithm == 'count sort') {
         let maxDepth = -Infinity;
         let minDepth = Infinity;
-        let sizeList = new Int32Array(gaussians.count);
+        let sizeList = new Int32Array(n_gaussians);
 
-        for (let i = 0; i < gaussians.count; i++) {
+        for (let i = 0; i < n_gaussians; i++) {
             const depth = (calcDepth(i) * 4096) | 0
 
             sizeList[i] = depth
@@ -116,13 +177,13 @@ function sortGaussiansByDepth(gaussians: GaussianScene, viewMatrix: Float32Array
 
         let depthInv = (256 * 256) / (maxDepth - minDepth);
         let counts0 = new Uint32Array(256 * 256);
-        for (let i = 0; i < gaussians.count; i++) {
+        for (let i = 0; i < n_gaussians; i++) {
             sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
             counts0[sizeList[i]]++;
         }
         let starts0 = new Uint32Array(256 * 256);
         for (let i = 1; i < 256 * 256; i++) starts0[i] = starts0[i - 1] + counts0[i - 1];
-        for (let i = 0; i < gaussians.count; i++) depthIndex[starts0[sizeList[i]]++] = i;
+        for (let i = 0; i < n_gaussians; i++) depthIndex[starts0[sizeList[i]]++] = i;
     }
 
     return depthIndex;
