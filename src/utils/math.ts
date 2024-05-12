@@ -29,7 +29,7 @@ export function arrayMin(arr: number[]| Float32Array): number {
   return min;
 }
 
-export function arrayMax(arr: number[]| Float32Array): number {
+export function arrayMax(arr: number[]| Float32Array|Uint32Array): number {
   let max = -Infinity;
   for (let i = 0; i < arr.length; i++) {
     max = Math.max(max, arr[i]);

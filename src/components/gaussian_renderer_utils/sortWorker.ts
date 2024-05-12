@@ -94,6 +94,7 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
         data.positions[j * 3 + 2] = gaussians.positions[i * 3 + 2]
 
         data.opacities[j] = gaussians.opacities[i]
+        data.objectIds[j] = gaussians.objectIds[i]
 
         // Split the covariance matrix into two vec3
         // so they can be used as vertex shader attributes

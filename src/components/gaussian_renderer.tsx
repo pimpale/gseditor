@@ -209,10 +209,17 @@ void main() {
         discard;
     }
 
+    float col_alpha = alpha;
+
+    // with depth we want to avoid including the depth value of faint splats
+    float depth_alpha = alpha*float(alpha > 50./255.);
+
     // Eq. (3) from 3D Gaussian splatting paper.
-    fragColor = vec4(col * alpha, alpha);
-    fragInvDepth = vec4(vec3(1.0/depth) * alpha, alpha);
-    fragObjId = objId;
+    fragColor = vec4(col * col_alpha, col_alpha);
+    fragInvDepth = vec4(vec3(1.0/depth) * depth_alpha, depth_alpha);
+    if(alpha > 100./255.) {
+      fragObjId = objId;
+    }
 }`;
 
 
@@ -244,7 +251,7 @@ layout(location=2) out uint fragObjId;
 void main() {
   fragColor = vec4(0.0, 0.0, 0.0, 0.0);
   fragInvDepth = vec4(0.0, 0.0, 0.0, 0.0);
-  fragObjId = 0u;
+  fragObjId = 0xFFFFFFFFu;
 }`;
 
 
@@ -941,6 +948,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
   // visualization canvases
   private gsEngineColorViz = React.createRef<HTMLCanvasElement>();
   private gsEngineDepthViz = React.createRef<HTMLCanvasElement>();
+  private gsEngineIdViz = React.createRef<HTMLCanvasElement>();
 
   private overlayEngineColorViz = React.createRef<HTMLCanvasElement>();
   private overlayEngineDepthViz = React.createRef<HTMLCanvasElement>();
@@ -948,6 +956,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
   // visualization canvas data
   private gsColorVizData!: VizData;
   private gsDepthVizData!: VizData;
+  private gsIdVizData!: VizData;
 
   private overlayColorVizData!: VizData;
   private overlayDepthVizData!: VizData;
@@ -1025,6 +1034,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     // set up viz canvases
     this.gsColorVizData = this.setupVizCanvas(this.gsEngineColorViz.current!);
     this.gsDepthVizData = this.setupVizCanvas(this.gsEngineDepthViz.current!);
+    this.gsIdVizData = this.setupVizCanvas(this.gsEngineIdViz.current!);
     this.overlayColorVizData = this.setupVizCanvas(this.overlayEngineColorViz.current!);
     this.overlayDepthVizData = this.setupVizCanvas(this.overlayEngineDepthViz.current!);
 
@@ -1106,10 +1116,21 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
 
-  convertTex = (tex_data: Float32Array) => {
+  convertRGBA32Tex = (tex_data: Float32Array) => {
     const tex = new Uint8Array(tex_data.length);
     for (let i = 0; i < tex_data.length; i++) {
       tex[i] = Math.floor(tex_data[i] * 255);
+    }
+    return tex;
+  }
+
+  convertR32UITex = (tex_data: Uint32Array) => {
+    const tex = new Uint8Array(tex_data.length);
+    for (let i = 0; i < tex_data.length/4; i++) {
+      tex[i * 4] = (tex_data[i*4] & 0xFF);
+      tex[i * 4 + 1] = (tex_data[i*4] & 0xFF00) >> 8;
+      tex[i * 4 + 2] = (tex_data[i*4] & 0xFF0000) >> 16;
+      tex[i * 4 + 3] = 255;
     }
     return tex;
   }
@@ -1125,7 +1146,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     const ply_file = this.fileInput.current?.files?.[0];
     if (ply_file) {
       this.gsRendererEngine.addObject(
-        Math.random() * 100,
+        Math.floor(Math.random() * 0xFFFFFFFF),
         mat4.identity(mat4.create()),
         loadPly(await ply_file.arrayBuffer()),
         this.camera
@@ -1153,9 +1174,16 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.gl.readBuffer(this.gl.COLOR_ATTACHMENT1);
     this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA, this.gl.FLOAT, depth_tex_data);
 
+   // copy obj id texture
+   const obj_id_tex_data = new Uint32Array(this.gsRendererEngine.get_xsize() * this.gsRendererEngine.get_ysize() * 4);
+   this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.gsRendererEngine.fbo);
+   this.gl.readBuffer(this.gl.COLOR_ATTACHMENT2);
+   this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA_INTEGER, this.gl.UNSIGNED_INT, obj_id_tex_data);
+
     // visualize textures
     this.visualizeTexture(this.gsColorVizData, color_tex_data);
-    this.visualizeTexture(this.gsDepthVizData, this.convertTex(depth_tex_data));
+    this.visualizeTexture(this.gsDepthVizData, this.convertRGBA32Tex(depth_tex_data));
+    this.visualizeTexture(this.gsIdVizData, this.convertR32UITex(obj_id_tex_data));
 
     // render overlay to texture
     this.overlayEngine.render(this.camera);
@@ -1174,8 +1202,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
 
     // visualize textures
     this.visualizeTexture(this.overlayColorVizData, overlay_color_tex_data);
-    this.visualizeTexture(this.overlayDepthVizData, this.convertTex(overlay_depth_tex_data));
-
+    this.visualizeTexture(this.overlayDepthVizData, this.convertRGBA32Tex(overlay_depth_tex_data));
 
     // composite
     this.compositor.render(
@@ -1209,6 +1236,13 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
         style={this.props.style}
         className={this.props.className}
         ref={this.gsEngineDepthViz}
+        height={this.props.height}
+        width={this.props.width}
+      />
+            <canvas
+        style={this.props.style}
+        className={this.props.className}
+        ref={this.gsEngineIdViz}
         height={this.props.height}
         width={this.props.width}
       />
