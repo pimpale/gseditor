@@ -12,6 +12,7 @@ export class CanvasMouseTracker {
   mouseDownListeners: Array<(p: Point) => void> = [];
   mouseMoveListeners: Array<(p: Point) => void> = [];
   mouseUpListeners: Array<(p: Point) => void> = [];
+  mouseClickListeners: Array<(p: Point) => void> = [];
 
   constructor(ctx: HTMLCanvasElement) {
     this.canvas = ctx;
@@ -20,6 +21,7 @@ export class CanvasMouseTracker {
     this.canvas.addEventListener('pointerdown', this.handleMouseDown);
     this.canvas.addEventListener('pointermove', this.handleMouseMove);
     window.addEventListener('pointerup', this.handleMouseUp);
+    this.canvas.addEventListener('dblclick', this.handleMouseClick);
     // disable touch movements
     this.canvas.addEventListener("touchstart", this.discardTouchEvent)
     this.canvas.addEventListener("touchmove", this.discardTouchEvent)
@@ -32,7 +34,9 @@ export class CanvasMouseTracker {
   addMouseMoveListener = (f: (p: Point) => void) => { this.mouseMoveListeners.push(f) };
   removeMouseMoveListener = (f: (p: Point) => void) => { this.mouseMoveListeners = this.mouseMoveListeners.filter(x => x !== f) };
   addMouseUpListener = (f: (p: Point) => void) => { this.mouseUpListeners.push(f) };
-  reupMouseUpListener = (f: (p: Point) => void) => { this.mouseUpListeners = this.mouseUpListeners.filter(x => x !== f) };
+  removeMouseUpListener = (f: (p: Point) => void) => { this.mouseUpListeners = this.mouseUpListeners.filter(x => x !== f) };
+  addMouseClickListener = (f: (p: Point) => void) => { this.mouseClickListeners.push(f) };
+  removeMouseClickListener = (f: (p: Point) => void) => { this.mouseClickListeners = this.mouseClickListeners.filter(x => x !== f) };
 
   private getMousePos(canvas: HTMLCanvasElement, evt: MouseEvent) {
     const rect = canvas.getBoundingClientRect(); // abs. size of element
@@ -77,6 +81,13 @@ export class CanvasMouseTracker {
     }
   }
 
+  handleMouseClick = (e: MouseEvent) => {
+    const v = this.getMousePos(this.canvas, e);
+    for (const f of this.mouseClickListeners) {
+      f(v);
+    }
+  }
+
   discardTouchEvent = (e: TouchEvent) => e.preventDefault();
 
   cleanup = () => {
@@ -84,6 +95,7 @@ export class CanvasMouseTracker {
     this.canvas.removeEventListener('pointerdown', this.handleMouseDown);
     this.canvas.removeEventListener('pointermove', this.handleMouseMove);
     window.removeEventListener('pointerup', this.handleMouseUp);
+    this.canvas.removeEventListener('dblclick', this.handleMouseClick);
     // reenable touch movements
     this.canvas.removeEventListener("touchstart", this.discardTouchEvent)
     this.canvas.removeEventListener("touchmove", this.discardTouchEvent)

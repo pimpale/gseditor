@@ -32,7 +32,7 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
     console.log("[Worker] Received message")
 
     const { sceneGraph, viewMatrix, sortingAlgorithm } = event.data
-    
+
     const start = performance.now()
 
     const count = [...sceneGraph.values()].reduce((a, b) => a + b.object.count, 0)
