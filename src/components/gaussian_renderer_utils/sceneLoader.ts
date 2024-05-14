@@ -3,20 +3,16 @@ import { mat3, vec3, vec4 } from 'gl-matrix';
 // a raw input object
 export type GaussianObjectInput = {
     count: number,
-    // array of size 3 containing the minimum pos in scene
-    sceneMin: Float32Array,
-    // array of size 3 containing the maximum pos in scene
-    sceneMax: Float32Array,
     // gaussian positions, size 3 * gaussianCount
     positions: Float32Array,
     // gaussian opacities, size gaussianCount
     opacities: Float32Array,
     // gaussian colors, size 3 * gaussianCount
     colors: Float32Array,
-    // gaussian covariance matrices, row 1, size 3 * gaussianCount
-    cov3Da: Float32Array
-    // gaussian covariance matrices, row 2, size 3 * gaussianCount
-    cov3Db: Float32Array
+    // gaussian rotation quaternions, size 4 * gaussianCount
+    rotations: Float32Array
+    // gaussian scales, size 3 * gaussianCount
+    scales: Float32Array
 }
 
 
@@ -44,13 +40,6 @@ export function loadPly(content: ArrayBuffer): GaussianObjectInput {
     const scales: number[] = []
     const harmonics: number[] = []
     const colors: number[] = []
-    const cov3Da: number[] = []
-    const cov3Db: number[] = []
-
-
-    // Scene bouding box
-    let sceneMin = new Array(3).fill(Infinity)
-    let sceneMax = new Array(3).fill(-Infinity)
 
     // Helpers
     const sigmoid = (m1: number) => 1 / (1 + Math.exp(-m1))
@@ -90,10 +79,6 @@ export function loadPly(content: ArrayBuffer): GaussianObjectInput {
         // Extract data for current gaussian
         let { position, harmonic, opacity, scale, rotation } = extractSplatData(i)
 
-        // Update scene bounding box
-        sceneMin = sceneMin.map((v, j) => Math.min(v, position[j]))
-        sceneMax = sceneMax.map((v, j) => Math.max(v, position[j]))
-
         // Normalize quaternion
         let length2 = 0
 
@@ -103,9 +88,11 @@ export function loadPly(content: ArrayBuffer): GaussianObjectInput {
         const length = Math.sqrt(length2)
 
         rotation = rotation.map(v => v / length)
+        rotations.push(...rotation)
 
         // Exponentiate scale
         scale = scale.map(v => Math.exp(v))
+        scales.push(...scale)
 
         // Activate alpha
         opacity = sigmoid(opacity)
@@ -129,15 +116,6 @@ export function loadPly(content: ArrayBuffer): GaussianObjectInput {
         colors.push(...color)
         // harmonics.push(...harmonic)
 
-        // (Webgl-specific) Pre-compute the 3D covariance matrix from
-        // the rotation and scale in order to avoid recomputing it at each frame.
-        // This also allow to avoid sending rotations and scales to the web worker or GPU.
-        const [cov3Ds_a, cov3Ds_b] = computeCov3D(scale, 1, rotation)
-        cov3Da.push(...cov3Ds_a)
-        cov3Db.push(...cov3Ds_b)
-        // rotations.push(...rotation)
-        // scales.push(...scale)
-
         positions.push(...position)
     }
 
@@ -145,53 +123,10 @@ export function loadPly(content: ArrayBuffer): GaussianObjectInput {
     
     return {
         count: gaussianCount,
-        sceneMax: Float32Array.from(sceneMax),
-        sceneMin: Float32Array.from(sceneMin),
         positions: Float32Array.from(positions),
         opacities: Float32Array.from(opacities),
         colors: Float32Array.from(colors),
-        cov3Da: Float32Array.from(cov3Da),
-        cov3Db: Float32Array.from(cov3Db)
+        scales: Float32Array.from(scales),
+        rotations: Float32Array.from(rotations)
     }
-}
-
-// Converts scale and rotation properties of each
-// Gaussian to a 3D covariance matrix in world space.
-// Original CUDA implementation: https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu#L118
-function computeCov3D(scale: vec3, mod: number, rot: vec4): [number[], number[]] {
-    const tmp = mat3.create()
-    const S = mat3.create()
-    const R = mat3.create()
-    const M = mat3.create()
-    const Sigma = mat3.create()
-
-    // Create scaling matrix
-    mat3.set(S,
-        mod * scale[0], 0, 0,
-        0, mod * scale[1], 0,
-        0, 0, mod * scale[2]
-    )
-
-    const r = rot[0]
-    const x = rot[1]
-    const y = rot[2]
-    const z = rot[3]
-
-    // Compute rotation matrix from quaternion
-    mat3.set(R,
-        1. - 2. * (y * y + z * z), 2. * (x * y - r * z), 2. * (x * z + r * y),
-        2. * (x * y + r * z), 1. - 2. * (x * x + z * z), 2. * (y * z - r * x),
-        2. * (x * z - r * y), 2. * (y * z + r * x), 1. - 2. * (x * x + y * y)
-    )
-
-    mat3.multiply(M, S, R)  // M = S * R
-
-    // Compute 3D world covariance matrix Sigma
-    mat3.multiply(Sigma, mat3.transpose(tmp, M), M)  // Sigma = transpose(M) * M
-
-    // Covariance is symmetric, only store upper right
-    return [
-        [Sigma[0], Sigma[1], Sigma[2]],
-        [Sigma[4], Sigma[5], Sigma[8]]
-    ]
 }

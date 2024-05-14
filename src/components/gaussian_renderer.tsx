@@ -1,7 +1,7 @@
 import React from "react";
 import { createShader, createProgram, createTexture, createRGBA32FTexture, createDepth32FTexture, createR32UITexture, } from '../utils/webgl';
 import { Camera, TrackballCamera, } from '../utils/camera';
-import { mat4, quat } from 'gl-matrix';
+import { mat4, quat, vec3 } from 'gl-matrix';
 import { arrayMax, deg2rad } from "../utils/math";
 import { GaussianObjectInput, loadPly } from "./gaussian_renderer_utils/sceneLoader";
 import Form from 'react-bootstrap/Form';
@@ -43,7 +43,7 @@ uniform mat4 viewmatrix;
 uniform vec3 boxmin;
 uniform vec3 boxmax;
 
-out vec3 col;
+out vec3 splat_color;
 out float depth;
 out float scale_modif;
 out vec4 con_o;
@@ -154,7 +154,7 @@ void main() {
     vec2 screen_pos = point_image + my_radius * corner;
 
     // Store some useful helper data for the fragment stage
-    col = a_col;
+    splat_color = a_col;
     con_o = vec4(conic, a_opacity);
     xy = point_image;
     pixf = screen_pos;
@@ -170,6 +170,9 @@ void main() {
 const gsengine_fs = `#version 300 es
 precision highp float;
 
+// time
+uniform float time;
+
 // which object is selected
 uniform uint selectedObjectId;
 
@@ -178,7 +181,7 @@ uniform uint selectedObjectId;
 // 2 = highlight selected object
 uniform uint selectedObjectRenderMode;
 
-in vec3 col;
+in vec3 splat_color;
 in float scale_modif;
 in float depth;
 in vec4 con_o;
@@ -203,9 +206,9 @@ void main() {
     }
 
     // highlight selected object
-    vec3 color = col;
+    vec3 color = splat_color;
     if (selectedObjectRenderMode == 2u && objId == selectedObjectId) {
-      color = vec3(1.0, 0.0, 0.0);
+      color = mix(splat_color, vec3(1.0, 0.0, 0.0), mod(time + gl_FragCoord.x/10.0 + gl_FragCoord.y/10.0, 1.0));
     }
 
     // Resample using conic matrix (cf. "Surface 
@@ -269,7 +272,8 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
 }
 
 type GaussianRendererEngineSceneObject = {
-  transform: mat4,
+  translate: vec3,
+  rotate: quat,
   object: GaussianObjectInput,
 }
 
@@ -288,6 +292,9 @@ class GaussianRendererEngine {
   private sceneGraph: Map<number, GaussianRendererEngineSceneObject> = new Map();
   private processed_scenegraph: ProcessedGaussianScene | null = null;
 
+  // whether we need to rebuild the processed scenegraph
+  private needs_rebuild: boolean = true;
+
   // uniforms
   private wLoc: WebGLUniformLocation;
   private hLoc: WebGLUniformLocation;
@@ -302,6 +309,7 @@ class GaussianRendererEngine {
   private boxMaxLoc: WebGLUniformLocation;
   private selectedObjectRenderModeLoc: WebGLUniformLocation;
   private selectedObjectIdLoc: WebGLUniformLocation;
+  private timeLoc: WebGLUniformLocation;
 
   // vertex array object
   private vao: WebGLVertexArrayObject;
@@ -378,6 +386,7 @@ class GaussianRendererEngine {
     this.viewMatrixLoc = this.gl.getUniformLocation(this.program, 'viewmatrix')!;
     this.boxMinLoc = this.gl.getUniformLocation(this.program, 'boxmin')!;
     this.boxMaxLoc = this.gl.getUniformLocation(this.program, 'boxmax')!;
+    this.timeLoc = this.gl.getUniformLocation(this.program, 'time')!;
     this.selectedObjectRenderModeLoc = this.gl.getUniformLocation(this.program, 'selectedObjectRenderMode')!;
     this.selectedObjectIdLoc = this.gl.getUniformLocation(this.program, 'selectedObjectId')!;
 
@@ -415,23 +424,36 @@ class GaussianRendererEngine {
     }
   }
 
-  addObject = (id: number, transform: mat4, object: GaussianObjectInput, camera: Camera) => {
-    this.sceneGraph.set(id, { transform, object });
-    this.doWorkerSort(camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height));
+  getObject = (id: number) => {
+    return this.sceneGraph.get(id);
   }
 
-  transformObject = (id: number, transform: mat4, camera: Camera) => {
+  addObject = (id: number, translate: vec3, rotate: quat, object: GaussianObjectInput) => {
+    this.sceneGraph.set(id, { translate, rotate, object });
+    this.needs_rebuild = true;
+  }
+
+  translateObject = (id: number, translate: vec3) => {
     const obj = this.sceneGraph.get(id);
     if (obj === undefined) {
       throw Error(`Object with id ${id} does not exist`)
     }
-    obj.transform = transform;
-    this.doWorkerSort(camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height));
+    obj.translate = translate;
+    this.needs_rebuild = true;
   }
 
-  removeObject = (id: number, camera: Camera) => {
+  rotateObject = (id: number, rotate: quat) => {
+    const obj = this.sceneGraph.get(id);
+    if (obj === undefined) {
+      throw Error(`Object with id ${id} does not exist`)
+    }
+    obj.rotate = rotate;
+    this.needs_rebuild = true;
+  }
+
+  removeObject = (id: number) => {
     this.sceneGraph.delete(id);
-    this.doWorkerSort(camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height));
+    this.needs_rebuild = true;
   }
 
   doWorkerSort = (viewProjMatrix: mat4) => {
@@ -440,7 +462,7 @@ class GaussianRendererEngine {
 
     this.sortWorker.postMessage({
       viewMatrix: this.lastSortedViewProjMatrix,
-      sortingAlgorithm: 'Array.sort',
+      sortingAlgorithm: 'count sort',
       sceneGraph: this.sceneGraph
     });
   }
@@ -491,7 +513,6 @@ class GaussianRendererEngine {
     const viewMatrix = camera.viewMatrix();
     const viewProjMatrix = camera.viewProjMatrix(W, H)
 
-
     this.gl.uniform1f(this.wLoc, W);
     this.gl.uniform1f(this.hLoc, H);
     this.gl.uniform1f(this.focalXLoc, focal_x);
@@ -501,8 +522,8 @@ class GaussianRendererEngine {
     this.gl.uniform1f(this.scaleModifierLoc, 1.0);
     this.gl.uniformMatrix4fv(this.viewMatrixLoc, false, convertViewMatrixTargetCoordinateSystem(viewMatrix));
     this.gl.uniformMatrix4fv(this.projMatrixLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(viewProjMatrix));
-
     this.gl.uniform1ui(this.selectedObjectRenderModeLoc, 1);
+    this.gl.uniform1f(this.timeLoc, performance.now() / 1000.0);
 
     for (const id of this.sceneGraph.keys()) {
       const depth_buffer = new Float32Array(W * H * 4);
@@ -510,7 +531,7 @@ class GaussianRendererEngine {
       if (this.processed_scenegraph) {
         this.gl.uniform3fv(this.boxMinLoc, this.processed_scenegraph.sceneMin)
         this.gl.uniform3fv(this.boxMaxLoc, this.processed_scenegraph.sceneMax)
-        
+
         // clear the framebuffer
         this.gl.clear(this.gl.COLOR_BUFFER_BIT);
 
@@ -528,7 +549,7 @@ class GaussianRendererEngine {
   }
 
 
-  render = (camera: Camera, selected_object_id: number|null) => {
+  render = (camera: Camera, selected_object_id: number | null) => {
     // bind the framebuffer
     this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.fbo);
     this.gl.viewport(0, 0, this.xsize, this.ysize);
@@ -557,7 +578,7 @@ class GaussianRendererEngine {
     const viewMatrix = camera.viewMatrix();
     const viewProjMatrix = camera.viewProjMatrix(W, H)
 
-    if(selected_object_id !== null) {
+    if (selected_object_id !== null) {
       this.gl.uniform1ui(this.selectedObjectIdLoc, selected_object_id);
       this.gl.uniform1ui(this.selectedObjectRenderModeLoc, 2);
     } else {
@@ -573,6 +594,7 @@ class GaussianRendererEngine {
     this.gl.uniform1f(this.scaleModifierLoc, 1.0);
     this.gl.uniformMatrix4fv(this.viewMatrixLoc, false, convertViewMatrixTargetCoordinateSystem(viewMatrix));
     this.gl.uniformMatrix4fv(this.projMatrixLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(viewProjMatrix));
+    this.gl.uniform1f(this.timeLoc, performance.now() / 1000.0);
 
     if (this.processed_scenegraph) {
       this.gl.uniform3fv(this.boxMinLoc, this.processed_scenegraph.sceneMin)
@@ -584,12 +606,18 @@ class GaussianRendererEngine {
   }
 
   update = (camera: Camera) => {
+    let needs_rebuild = this.needs_rebuild;
     const viewProjMatrix = camera.viewProjMatrix(this.gl.canvas.width, this.gl.canvas.height);
     if (this.processed_scenegraph && this.lastSortedViewProjMatrix) {
       const f = mat4.frob(mat4.subtract(mat4.create(), viewProjMatrix, this.lastSortedViewProjMatrix));
-      if (f > 0.1 && !this.sortWorkerBusy) {
-        this.doWorkerSort(viewProjMatrix);
+      if (f > 0.1) {
+        needs_rebuild = true;
       }
+    }
+
+    if (needs_rebuild && !this.sortWorkerBusy) {
+      this.doWorkerSort(viewProjMatrix);
+      this.needs_rebuild = false;
     }
   }
 
@@ -974,6 +1002,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
 
   private click_location: Point | null = null;
   private selected_object_id: number | null = null;
+  private edit_mode: "translate" | "rotate" | null = null;
 
 
   // renders gaussians
@@ -1049,7 +1078,19 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
 
     this.cmt = new CanvasMouseTracker(canvas);
     this.cmt.addMouseClickListener(e => this.click_location = e);
-
+    this.cmt.addKeyDownListener(s => {
+      console.log(s)
+      switch (s) {
+        case 'm':
+          this.edit_mode = "translate";
+          break;
+        case 'r':
+          this.edit_mode = "rotate";
+          break;
+        default:
+          this.edit_mode = null;
+      }
+    });
     this.requestID = window.requestAnimationFrame(this.animationLoop);
   }
 
@@ -1146,9 +1187,9 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     if (ply_file) {
       this.gsRendererEngine.addObject(
         Math.floor(Math.random() * 0xFFFFFFFF),
-        mat4.identity(mat4.create()),
+        vec3.fromValues(0, 0, 0),
+        quat.create(),
         loadPly(await ply_file.arrayBuffer()),
-        this.camera
       );
     }
   }
@@ -1165,10 +1206,10 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
       const click_loc_idx = Math.floor(this.click_location.x) + Math.floor(this.gsRendererEngine.get_ysize() - this.click_location.y) * this.gsRendererEngine.get_xsize();
       const depth_arrs = this.gsRendererEngine.renderDepths(this.camera);
       let nearest_inv_depth = 0;
-      let nearest_depth_obj: number|null = null;
+      let nearest_depth_obj: number | null = null;
       for (const [id, depth_arr] of depth_arrs) {
-        const candidate_inv_depth = depth_arr[4*click_loc_idx];
-        if(candidate_inv_depth > nearest_inv_depth) {
+        const candidate_inv_depth = depth_arr[4 * click_loc_idx];
+        if (candidate_inv_depth > nearest_inv_depth) {
           nearest_inv_depth = candidate_inv_depth;
           nearest_depth_obj = id;
         }
@@ -1181,6 +1222,26 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
         this.selected_object_id = nearest_depth_obj;
       }
       this.click_location = null;
+    }
+
+    // handle modes
+    switch (this.edit_mode) {
+      case null:
+        break;
+      case "translate":
+        if (this.selected_object_id !== null) {
+          const o = this.gsRendererEngine.getObject(this.selected_object_id)!;
+          this.gsRendererEngine.translateObject(this.selected_object_id, vec3.fromValues(o.translate[0], o.translate[1], o.translate[2] + 0.01));
+        }
+        break;
+      case "rotate":
+        if (this.selected_object_id !== null) {
+          const o = this.gsRendererEngine.getObject(this.selected_object_id)!;
+          this.gsRendererEngine.rotateObject(this.selected_object_id, quat.mul(quat.create(), o.rotate, quat.fromEuler(quat.create(), 0, 1, 0)));
+          // this.gsRendererEngine.rotateObject(this.selected_object_id, quat.fromEuler(quat.create(), 0, 0.9, 0));
+
+        }
+        break;
     }
 
     // render gaussians to texture
@@ -1235,6 +1296,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
   render() {
     return <>
       < canvas
+        tabIndex={0}
         style={this.props.style}
         className={this.props.className}
         ref={this.canvas}

@@ -1,17 +1,11 @@
-import { mat4 } from "gl-matrix"
+import { mat3, mat4, quat, vec3, vec4 } from "gl-matrix"
 import assert from "../../utils/assert"
 import { GaussianObjectInput } from "./sceneLoader"
-
-
-type GaussianContextualizedObject = {
-    id: number
-    obj: GaussianObjectInput,
-}
 
 type SortWorkerInput = {
     viewMatrix: Float32Array
     sortingAlgorithm: string
-    sceneGraph: Map<number, { transform: mat4, object: GaussianObjectInput }>
+    sceneGraph: Map<number, { translate: vec3, rotate: quat, object: GaussianObjectInput }>
 }
 
 // a processed input object with object ids
@@ -54,13 +48,30 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
     for (const [key, value] of sceneGraph.entries()) {
         const id = key
         const g = value.object;
-        gaussians.sceneMin = gaussians.sceneMin.map((v, j) => Math.min(v, g.sceneMin[j]))
-        gaussians.sceneMax = gaussians.sceneMax.map((v, j) => Math.max(v, g.sceneMax[j]))
         gaussians.colors.set(g.colors, offset * 3)
-        gaussians.positions.set(g.positions, offset * 3)
         gaussians.opacities.set(g.opacities, offset)
-        gaussians.cov3Da.set(g.cov3Da, offset * 3)
-        gaussians.cov3Db.set(g.cov3Db, offset * 3)
+
+        const g_positions = new Float32Array(g.count * 3);
+        for (let i = 0; i < g.count; i++) {
+            const pos = vec3.transformQuat(vec3.create(), g.positions.slice(i * 3, i * 3 + 3), value.rotate)
+            vec3.add(pos, pos, value.translate)
+            g_positions.set(pos, i * 3)
+            gaussians.sceneMin = gaussians.sceneMin.map((v, j) => Math.min(v, pos[j]))
+            gaussians.sceneMax = gaussians.sceneMax.map((v, j) => Math.max(v, pos[j]))
+        }
+        gaussians.positions.set(g_positions, offset * 3)
+
+        const g_cov3Da = new Float32Array(g.count * 3)
+        const g_cov3Db = new Float32Array(g.count * 3)
+        for (let i = 0; i < g.count; i++) {
+            const rotation = quat.multiply(quat.create(), g.rotations.slice(i * 4, i * 4 + 4), value.rotate);
+            const [cov3Da, cov3Db] = computeCov3D(g.scales.slice(i * 3, i * 3 + 3), 1, rotation);
+            g_cov3Da.set(cov3Da, i * 3)
+            g_cov3Db.set(cov3Db, i * 3)
+        }
+
+        gaussians.cov3Da.set(g_cov3Da, offset * 3)
+        gaussians.cov3Db.set(g_cov3Db, offset * 3)
         gaussians.objectIds.fill(id, offset, offset + g.count)
         offset += g.count
     }
@@ -214,4 +225,46 @@ function partition(A: Float32Array, B: Float32Array | Uint32Array, lo: number, h
         let tmp = A[i]; A[i] = A[j]; A[j] = tmp // Swap A
         tmp = B[i]; B[i] = B[j]; B[j] = tmp // Swap B
     }
+}
+
+
+// Converts scale and rotation properties of each
+// Gaussian to a 3D covariance matrix in world space.
+// Original CUDA implementation: https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu#L118
+function computeCov3D(scale: vec3, mod: number, rot: vec4): [number[], number[]] {
+    const tmp = mat3.create()
+    const S = mat3.create()
+    const R = mat3.create()
+    const M = mat3.create()
+    const Sigma = mat3.create()
+
+    // Create scaling matrix
+    mat3.set(S,
+        mod * scale[0], 0, 0,
+        0, mod * scale[1], 0,
+        0, 0, mod * scale[2]
+    )
+
+    const r = rot[0]
+    const x = rot[1]
+    const y = rot[2]
+    const z = rot[3]
+
+    // Compute rotation matrix from quaternion
+    mat3.set(R,
+        1. - 2. * (y * y + z * z), 2. * (x * y - r * z), 2. * (x * z + r * y),
+        2. * (x * y + r * z), 1. - 2. * (x * x + z * z), 2. * (y * z - r * x),
+        2. * (x * z - r * y), 2. * (y * z + r * x), 1. - 2. * (x * x + y * y)
+    )
+
+    mat3.multiply(M, S, R)  // M = S * R
+
+    // Compute 3D world covariance matrix Sigma
+    mat3.multiply(Sigma, mat3.transpose(tmp, M), M)  // Sigma = transpose(M) * M
+
+    // Covariance is symmetric, only store upper right
+    return [
+        [Sigma[0], Sigma[1], Sigma[2]],
+        [Sigma[4], Sigma[5], Sigma[8]]
+    ]
 }

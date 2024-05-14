@@ -13,6 +13,7 @@ export class CanvasMouseTracker {
   mouseMoveListeners: Array<(p: Point) => void> = [];
   mouseUpListeners: Array<(p: Point) => void> = [];
   mouseClickListeners: Array<(p: Point) => void> = [];
+  keyDownListeners: Array<(e: string) => void> = [];
 
   constructor(ctx: HTMLCanvasElement) {
     this.canvas = ctx;
@@ -22,6 +23,7 @@ export class CanvasMouseTracker {
     this.canvas.addEventListener('pointermove', this.handleMouseMove);
     window.addEventListener('pointerup', this.handleMouseUp);
     this.canvas.addEventListener('dblclick', this.handleMouseClick);
+    this.canvas.addEventListener('keydown', this.handleKeyDown);
     // disable touch movements
     this.canvas.addEventListener("touchstart", this.discardTouchEvent)
     this.canvas.addEventListener("touchmove", this.discardTouchEvent)
@@ -37,6 +39,8 @@ export class CanvasMouseTracker {
   removeMouseUpListener = (f: (p: Point) => void) => { this.mouseUpListeners = this.mouseUpListeners.filter(x => x !== f) };
   addMouseClickListener = (f: (p: Point) => void) => { this.mouseClickListeners.push(f) };
   removeMouseClickListener = (f: (p: Point) => void) => { this.mouseClickListeners = this.mouseClickListeners.filter(x => x !== f) };
+  addKeyDownListener = (f: (s: string) => void) => { this.keyDownListeners.push(f) };
+  removeKeyDownListener = (f: (s: string) => void) => { this.keyDownListeners = this.keyDownListeners.filter(x => x !== f) };
 
   private getMousePos(canvas: HTMLCanvasElement, evt: MouseEvent) {
     const rect = canvas.getBoundingClientRect(); // abs. size of element
@@ -88,6 +92,12 @@ export class CanvasMouseTracker {
     }
   }
 
+  handleKeyDown = (e: KeyboardEvent) => {
+    for (const f of this.keyDownListeners) {
+      f(e.key);
+    }
+  }
+
   discardTouchEvent = (e: TouchEvent) => e.preventDefault();
 
   cleanup = () => {
@@ -96,6 +106,7 @@ export class CanvasMouseTracker {
     this.canvas.removeEventListener('pointermove', this.handleMouseMove);
     window.removeEventListener('pointerup', this.handleMouseUp);
     this.canvas.removeEventListener('dblclick', this.handleMouseClick);
+    this.canvas.removeEventListener('keydown', this.handleKeyDown);
     // reenable touch movements
     this.canvas.removeEventListener("touchstart", this.discardTouchEvent)
     this.canvas.removeEventListener("touchmove", this.discardTouchEvent)
