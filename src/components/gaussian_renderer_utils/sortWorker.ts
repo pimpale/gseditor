@@ -5,7 +5,7 @@ import { GaussianObjectInput } from "./sceneLoader"
 type SortWorkerInput = {
     viewMatrix: Float32Array
     sortingAlgorithm: string
-    sceneGraph: Map<number, { translate: vec3, rotate: quat, object: GaussianObjectInput }>
+    sceneGraph: Map<number, { translation: vec3, rotation: quat, object: GaussianObjectInput }>
 }
 
 // a processed input object with object ids
@@ -53,8 +53,8 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
 
         const g_positions = new Float32Array(g.count * 3);
         for (let i = 0; i < g.count; i++) {
-            const pos = vec3.transformQuat(vec3.create(), g.positions.slice(i * 3, i * 3 + 3), value.rotate)
-            vec3.add(pos, pos, value.translate)
+            const pos = vec3.transformQuat(vec3.create(), g.positions.slice(i * 3, i * 3 + 3), value.rotation)
+            vec3.add(pos, pos, value.translation)
             g_positions.set(pos, i * 3)
             gaussians.sceneMin = gaussians.sceneMin.map((v, j) => Math.min(v, pos[j]))
             gaussians.sceneMax = gaussians.sceneMax.map((v, j) => Math.max(v, pos[j]))
@@ -64,7 +64,7 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
         const g_cov3Da = new Float32Array(g.count * 3)
         const g_cov3Db = new Float32Array(g.count * 3)
         for (let i = 0; i < g.count; i++) {
-            const rotation = quat.multiply(quat.create(), g.rotations.slice(i * 4, i * 4 + 4), value.rotate);
+            const rotation = quat.multiply(quat.create(), g.rotations.slice(i * 4, i * 4 + 4), value.rotation);
             const [cov3Da, cov3Db] = computeCov3D(g.scales.slice(i * 3, i * 3 + 3), 1, rotation);
             g_cov3Da.set(cov3Da, i * 3)
             g_cov3Db.set(cov3Db, i * 3)

@@ -1,7 +1,7 @@
 import React from "react";
 import { createShader, createProgram, createTexture, createRGBA32FTexture, createDepth32FTexture, createR32UITexture, } from '../utils/webgl';
 import { Camera, TrackballCamera, } from '../utils/camera';
-import { mat4, quat, vec3 } from 'gl-matrix';
+import { mat4, quat, vec2, vec3 } from 'gl-matrix';
 import { arrayMax, deg2rad } from "../utils/math";
 import { GaussianObjectInput, loadPly } from "./gaussian_renderer_utils/sceneLoader";
 import Form from 'react-bootstrap/Form';
@@ -10,7 +10,7 @@ import { Vertex } from "../utils/vertex";
 import { polyline, polyline_facing_point } from "../utils/polyline";
 import { ProcessedGaussianScene } from "./gaussian_renderer_utils/sortWorker";
 import assert from "../utils/assert";
-import { CanvasMouseTracker, Point } from "../utils/canvas";
+import { CanvasMouseTracker } from "../utils/canvas";
 
 const QUAD_BUFFER = new Float32Array(genPlane(1, 1).flatMap(v => [v[0], v[1]]));
 
@@ -272,8 +272,8 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
 }
 
 type GaussianRendererEngineSceneObject = {
-  translate: vec3,
-  rotate: quat,
+  translation: vec3,
+  rotation: quat,
   object: GaussianObjectInput,
 }
 
@@ -429,25 +429,25 @@ class GaussianRendererEngine {
   }
 
   addObject = (id: number, translate: vec3, rotate: quat, object: GaussianObjectInput) => {
-    this.sceneGraph.set(id, { translate, rotate, object });
+    this.sceneGraph.set(id, { translation: translate, rotation: rotate, object });
     this.needs_rebuild = true;
   }
 
-  translateObject = (id: number, translate: vec3) => {
+  setPositionObject = (id: number, translate: vec3) => {
     const obj = this.sceneGraph.get(id);
     if (obj === undefined) {
       throw Error(`Object with id ${id} does not exist`)
     }
-    obj.translate = translate;
+    obj.translation = translate;
     this.needs_rebuild = true;
   }
 
-  rotateObject = (id: number, rotate: quat) => {
+  setRotationObject = (id: number, rotate: quat) => {
     const obj = this.sceneGraph.get(id);
     if (obj === undefined) {
       throw Error(`Object with id ${id} does not exist`)
     }
-    obj.rotate = rotate;
+    obj.rotation = rotate;
     this.needs_rebuild = true;
   }
 
@@ -671,6 +671,9 @@ void main() {
 }`;
 
 type DrawableObject = {
+  kind: "line" | "triangle",
+  translation: vec3,
+  rotation: quat,
   vertexes: Vertex[]
 }
 
@@ -678,9 +681,15 @@ class OverlayEngine {
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
 
-  private vao: WebGLVertexArrayObject;
-  private positionBuffer: WebGLBuffer;
-  private colorBuffer: WebGLBuffer;
+  private tri_vao: WebGLVertexArrayObject;
+  private tri_n_vertexes: number; // number of vertexes in the buffers (may differ from the scene graph)
+  private tri_positionBuffer: WebGLBuffer;
+  private tri_colorBuffer: WebGLBuffer;
+
+  private line_vao: WebGLVertexArrayObject;
+  private line_n_vertexes: number; // number of vertexes in the buffers (may differ from the scene graph)
+  private line_positionBuffer: WebGLBuffer;
+  private line_colorBuffer: WebGLBuffer;
 
   private viewLoc: WebGLUniformLocation;
   private viewProjLoc: WebGLUniformLocation;
@@ -700,8 +709,9 @@ class OverlayEngine {
   public get_xsize = () => this.xsize;
   public get_ysize = () => this.ysize;
 
-  private n_vertexes: number = 0;
-  private objects: DrawableObject[] = [];
+  private objects: Map<number, DrawableObject> = new Map();
+
+  private needs_rebuild: boolean = true;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -723,11 +733,20 @@ class OverlayEngine {
       return buffer
     }
 
-    this.vao = this.gl.createVertexArray()!;
-    this.gl.bindVertexArray(this.vao);
+    this.tri_vao = this.gl.createVertexArray()!;
+    this.gl.bindVertexArray(this.tri_vao);
 
-    this.positionBuffer = setupAttributeBuffer('a_position', 3);
-    this.colorBuffer = setupAttributeBuffer('a_color', 3);
+    this.tri_n_vertexes = 0;
+    this.tri_positionBuffer = setupAttributeBuffer('a_position', 3);
+    this.tri_colorBuffer = setupAttributeBuffer('a_color', 3);
+
+
+    this.line_vao = this.gl.createVertexArray()!;
+    this.gl.bindVertexArray(this.line_vao);
+
+    this.line_n_vertexes = 0;
+    this.line_positionBuffer = setupAttributeBuffer('a_position', 3);
+    this.line_colorBuffer = setupAttributeBuffer('a_color', 3);
 
     this.viewLoc = this.gl.getUniformLocation(this.program, 'u_view')!;
     this.viewProjLoc = this.gl.getUniformLocation(this.program, 'u_view_proj')!;
@@ -767,14 +786,14 @@ class OverlayEngine {
     );
   }
 
-  // updates the position and color buffers
-  reconstructBuffers = () => {
-    this.n_vertexes = this.objects.reduce((acc, obj) => acc + obj.vertexes.length, 0);
-    const positions = new Float32Array(this.n_vertexes * 3);
-    const colors = new Float32Array(this.n_vertexes * 3);
+  
+  buildBuffers = (drawables: DrawableObject[]): [Float32Array, Float32Array, number] => {
+    const n_vertexes = drawables.reduce((acc, obj) => acc + obj.vertexes.length, 0);
+    const positions = new Float32Array(n_vertexes * 3);
+    const colors = new Float32Array(n_vertexes * 3);
 
     let offset = 0;
-    for (const obj of this.objects) {
+    for (const obj of drawables) {
       for (const vertex of obj.vertexes) {
         positions.set(vertex.position, offset * 3);
         colors.set(vertex.color, offset * 3);
@@ -782,17 +801,70 @@ class OverlayEngine {
       }
     }
 
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.positionBuffer);
-    this.gl.bufferData(this.gl.ARRAY_BUFFER, positions, this.gl.STATIC_DRAW);
-
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
-    this.gl.bufferData(this.gl.ARRAY_BUFFER, colors, this.gl.STATIC_DRAW);
+    return [positions, colors, n_vertexes]
   }
 
 
-  addObject = (obj: DrawableObject) => {
-    this.objects.push(obj);
-    this.reconstructBuffers();
+  // updates the position and color buffers
+  update = () => {
+    if (this.needs_rebuild) {
+      const tri_drawables = [];
+      const line_drawables = [];
+      for (const obj of this.objects.values()) {
+        if (obj.kind === "triangle") {
+          tri_drawables.push(obj);
+        } else if (obj.kind === "line") {
+          line_drawables.push(obj);
+        }
+      }
+      const [tri_positions, tri_colors, tri_n_vertexes] = this.buildBuffers(tri_drawables);
+      const [line_positions, line_colors, line_n_vertexes] = this.buildBuffers(line_drawables);
+
+      this.gl.bindVertexArray(this.tri_vao);
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.tri_positionBuffer);
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, tri_positions, this.gl.STATIC_DRAW);
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.tri_colorBuffer);
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, tri_colors, this.gl.STATIC_DRAW);
+      this.tri_n_vertexes = tri_n_vertexes;
+
+      this.gl.bindVertexArray(this.line_vao);
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.line_positionBuffer);
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, line_positions, this.gl.STATIC_DRAW);
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.line_colorBuffer);
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, line_colors, this.gl.STATIC_DRAW);
+      this.line_n_vertexes = line_n_vertexes;
+
+      this.needs_rebuild = false;
+    }
+  }
+
+
+  addObject = (id: number, obj: DrawableObject) => {
+    this.objects.set(id, obj);
+    this.needs_rebuild = true;
+  }
+
+  setPositionObject = (id: number, translate: vec3) => {
+    const obj = this.objects.get(id);
+    if (obj === undefined) {
+      throw Error(`Object with id ${id} does not exist`)
+    }
+    obj.translation = translate;
+    this.needs_rebuild = true;
+  }
+
+  setRotationObject = (id: number, rotate: quat) => {
+    const obj = this.objects.get(id);
+    if (obj === undefined) {
+      throw Error(`Object with id ${id} does not exist`)
+    }
+    obj.rotation = rotate;
+    this.needs_rebuild = true;
+  }
+
+  removeObject = (id: number) => {
+    this.objects.delete(id);
+    this.needs_rebuild = true;
   }
 
   render = (camera: Camera) => {
@@ -804,14 +876,18 @@ class OverlayEngine {
     this.gl.uniformMatrix4fv(this.viewLoc, false, convertViewMatrixTargetCoordinateSystem(camera.viewMatrix()));
     this.gl.uniformMatrix4fv(this.viewProjLoc, false, convertViewProjectionMatrixTargetCoordinateSystem(camera.viewProjMatrix(this.xsize, this.ysize)));
 
-    this.gl.bindVertexArray(this.vao);
-
     this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.fbo);
     this.gl.drawBuffers([this.gl.COLOR_ATTACHMENT0, this.gl.COLOR_ATTACHMENT1]);
 
     this.gl.clear(this.gl.DEPTH_BUFFER_BIT | this.gl.COLOR_BUFFER_BIT);
     this.gl.viewport(0, 0, this.xsize, this.ysize);
-    this.gl.drawArrays(this.gl.TRIANGLES, 0, this.n_vertexes);
+
+    this.gl.bindVertexArray(this.tri_vao);
+    this.gl.drawArrays(this.gl.TRIANGLES, 0, this.tri_n_vertexes);
+
+    this.gl.bindVertexArray(this.line_vao);
+    this.gl.drawArrays(this.gl.LINES, 0, this.line_n_vertexes);
+
   }
 }
 
@@ -964,7 +1040,86 @@ void main() {
   v_outColor = vec4(texture(u_render_tex, v_texCoord).rgb, 1.0);
 }`;
 
+function axisNameToIdx(axis: "x" | "y" | "z"): number {
+  switch (axis) {
+    case "x":
+      return 0;
+    case "y":
+      return 1;
+    case "z":
+      return 2;
+    default:
+      throw Error("Invalid axis")
+  }
+}
 
+function axisNameToVec3(axis: "x" | "y" | "z"): vec3 {
+  switch (axis) {
+    case "x":
+      return vec3.fromValues(1, 0, 0);
+    case "y":
+      return vec3.fromValues(0, 1, 0);
+    case "z":
+      return vec3.fromValues(0, 0, 1);
+    default:
+      throw Error("Invalid axis")
+  }
+}
+
+
+type IdleSelectedObjectState = {
+  kind: "idle"
+}
+
+type TranslateSelectedObjectState = {
+  kind: "translate",
+}
+
+type RotateSelectedObjectState = {
+  kind: "rotate",
+}
+
+type TranslateWithAxisSelectedObjectState = {
+  kind: "translate_with_axis",
+  axis: "x" | "y" | "z",
+  mouse_start: vec2
+}
+
+type RotateWithAxisSelectedObjectState = {
+  kind: "rotate_with_axis",
+  axis: "x" | "y" | "z",
+  mouse_start: vec2
+}
+
+type SelectedObjectInterfaceState = {
+  kind: "selected_object_interface",
+  selected_object_id: number,
+  last_mouse_pos: vec2,
+  selected_object_state: RotateSelectedObjectState | RotateWithAxisSelectedObjectState | TranslateSelectedObjectState | TranslateWithAxisSelectedObjectState | IdleSelectedObjectState;
+}
+
+type IdleInterfaceState = {
+  kind: "idle"
+}
+
+type InterfaceState = IdleInterfaceState | SelectedObjectInterfaceState;
+
+type MouseMoveEvent = {
+  kind: "mousemove",
+  location: vec2
+}
+
+type MouseClickEvent = {
+  kind: "mouseclick",
+  location: vec2
+}
+
+type KeyDownEvent = {
+  kind: "keydown",
+  key: string
+}
+
+type InterfaceInput = MouseMoveEvent | MouseClickEvent | KeyDownEvent;
 
 type VizData = {
   gl: WebGL2RenderingContext,
@@ -1000,10 +1155,8 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
   private camera!: TrackballCamera;
   private cmt!: CanvasMouseTracker;
 
-  private click_location: Point | null = null;
-  private selected_object_id: number | null = null;
-  private edit_mode: "translate" | "rotate" | null = null;
-
+  private interface_state: InterfaceState = { kind: "idle" };
+  private interface_inputs: InterfaceInput[] = [];
 
   // renders gaussians
   private gsRendererEngine!: GaussianRendererEngine;
@@ -1034,42 +1187,6 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.overlayEngine = new OverlayEngine(this.gl);
     this.compositor = new Compositor(this.gl);
 
-    let circ_r2 = (theta: number): [number, number, number] => {
-      return [2 * Math.cos(theta), 0, 2 * Math.sin(theta)];
-    }
-
-    this.overlayEngine.addObject({
-      vertexes: polyline_facing_point(
-        // points in the line
-        [
-          circ_r2(0 / 6 * 2 * Math.PI),
-          circ_r2(1 / 6 * 2 * Math.PI),
-          circ_r2(2 / 6 * 2 * Math.PI),
-          circ_r2(3 / 6 * 2 * Math.PI),
-          circ_r2(4 / 6 * 2 * Math.PI),
-          circ_r2(5 / 6 * 2 * Math.PI),
-        ],
-        // width
-        [
-          0.1,
-          0.1,
-          0.1,
-          0.1,
-          0.1,
-          0.1,
-        ],
-        // colors
-        [
-          [1, 0, 0],
-          [0, 1, 0],
-          [0, 0, 1],
-          [1, 0, 0],
-          [0, 1, 0],
-        ],
-        [0, 0, 0]
-      )
-    });
-
     // set up viz canvases
     this.gsColorVizData = this.setupVizCanvas(this.gsEngineColorViz.current!);
     this.gsDepthVizData = this.setupVizCanvas(this.gsEngineDepthViz.current!);
@@ -1077,20 +1194,10 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.overlayDepthVizData = this.setupVizCanvas(this.overlayEngineDepthViz.current!);
 
     this.cmt = new CanvasMouseTracker(canvas);
-    this.cmt.addMouseClickListener(e => this.click_location = e);
-    this.cmt.addKeyDownListener(s => {
-      console.log(s)
-      switch (s) {
-        case 'm':
-          this.edit_mode = "translate";
-          break;
-        case 'r':
-          this.edit_mode = "rotate";
-          break;
-        default:
-          this.edit_mode = null;
-      }
-    });
+    this.cmt.addMouseClickListener(e => this.interface_inputs.push({ kind: "mouseclick", location: e }));
+    this.cmt.addMouseMoveListener(e => this.interface_inputs.push({ kind: "mousemove", location: e }));
+    this.cmt.addKeyDownListener(s => this.interface_inputs.push({ kind: "keydown", key: s }));
+
     this.requestID = window.requestAnimationFrame(this.animationLoop);
   }
 
@@ -1194,58 +1301,159 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     }
   }
 
+  getNearestObjectAt = (location: vec2): number | null => {
+    const click_loc_idx = Math.floor(location[0]) + Math.floor(this.gsRendererEngine.get_ysize() - location[1]) * this.gsRendererEngine.get_xsize();
+    const depth_arrs = this.gsRendererEngine.renderDepths(this.camera);
+    let nearest_inv_depth = 0;
+    let nearest_depth_obj: number | null = null;
+    for (const [id, depth_arr] of depth_arrs) {
+      const candidate_inv_depth = depth_arr[4 * click_loc_idx];
+      if (candidate_inv_depth > nearest_inv_depth) {
+        nearest_inv_depth = candidate_inv_depth;
+        nearest_depth_obj = id;
+      }
+    }
+    return nearest_depth_obj;
+  }
+
 
   animationLoop = () => {
     this.camera.update();
     this.gsRendererEngine.update(this.camera);
 
-    // handle click if exists
-    if (this.click_location) {
-      const old_selected_object_id = this.selected_object_id;
-      console.log("picking depth")
-      const click_loc_idx = Math.floor(this.click_location.x) + Math.floor(this.gsRendererEngine.get_ysize() - this.click_location.y) * this.gsRendererEngine.get_xsize();
-      const depth_arrs = this.gsRendererEngine.renderDepths(this.camera);
-      let nearest_inv_depth = 0;
-      let nearest_depth_obj: number | null = null;
-      for (const [id, depth_arr] of depth_arrs) {
-        const candidate_inv_depth = depth_arr[4 * click_loc_idx];
-        if (candidate_inv_depth > nearest_inv_depth) {
-          nearest_inv_depth = candidate_inv_depth;
-          nearest_depth_obj = id;
+    // process inputs
+    for (const input of this.interface_inputs) {
+      console.log(this.interface_state)
+      console.log(input);
+      switch (input.kind) {
+        case "mouseclick": {
+          switch (this.interface_state.kind) {
+            case "idle": {
+              const nearest_depth_obj = this.getNearestObjectAt(input.location);
+              if (nearest_depth_obj !== null) {
+                this.interface_state = {
+                  kind: "selected_object_interface",
+                  selected_object_id: nearest_depth_obj,
+                  selected_object_state: { kind: "idle" },
+                  last_mouse_pos: input.location
+                }
+              }
+              break;
+            }
+            case "selected_object_interface": {
+              const nearest_depth_obj = this.getNearestObjectAt(input.location);
+              if (nearest_depth_obj === this.interface_state.selected_object_id) {
+                // this.interface_state = { kind: "idle" };
+              } else if (nearest_depth_obj !== null) {
+                this.interface_state = {
+                  kind: "selected_object_interface",
+                  selected_object_id: nearest_depth_obj,
+                  selected_object_state: { kind: "idle" },
+                  last_mouse_pos: input.location
+                }
+              }
+              break;
+            }
+          }
+          break;
+        }
+        case "keydown": {
+          switch (this.interface_state.kind) {
+            case "selected_object_interface": {
+              switch (input.key) {
+                case "r": {
+                  this.interface_state.selected_object_state = { kind: "rotate", };
+                  break;
+                }
+                case "g": {
+                  this.interface_state.selected_object_state = { kind: "translate", };
+                  break;
+                }
+                case "x":
+                case "y":
+                case "z": {
+                  const axis = input.key as "x" | "y" | "z";
+                  if (this.interface_state.selected_object_state.kind === "rotate") {
+                    this.interface_state.selected_object_state = { kind: "rotate_with_axis", axis, mouse_start: this.interface_state.last_mouse_pos };
+                  } else if (this.interface_state.selected_object_state.kind === "translate") {
+                    this.interface_state.selected_object_state = { kind: "translate_with_axis", axis, mouse_start: this.interface_state.last_mouse_pos };
+                  }
+                  break;
+                }
+                case 'Escape': {
+                  switch (this.interface_state.selected_object_state.kind) {
+                    case "rotate_with_axis":
+                    case "translate_with_axis":
+                    case "rotate":
+                    case "translate": {
+                      this.interface_state.selected_object_state = { kind: "idle" };
+                      break;
+                    }
+                    case "idle": {
+                      this.interface_state = { kind: "idle" };
+                      break;
+                    }
+                  }
+                  break;
+                }
+                default: {
+                  console.log("unhandled key", input.key)
+                  break;
+                }
+              }
+              break;
+            }
+            default: {
+              break;
+            }
+          }
+          break;
+        }
+        case "mousemove": {
+          switch (this.interface_state.kind) {
+            case "selected_object_interface": {
+              this.interface_state.last_mouse_pos = input.location;
+              switch (this.interface_state.selected_object_state.kind) {
+                case "rotate_with_axis": {
+                  if (this.interface_state.selected_object_state.axis !== null) {
+                    const o = this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!;
+                    const mouse_delta = vec2.sub(vec2.create(), input.location, this.interface_state.selected_object_state.mouse_start);
+                    const rotation = quat.setAxisAngle(quat.create(), axisNameToVec3(this.interface_state.selected_object_state.axis), mouse_delta[0] * 0.0001);
+                    this.gsRendererEngine.setRotationObject(this.interface_state.selected_object_id, quat.mul(quat.create(), o.rotation, rotation));
+                  }
+                  break;
+                }
+                case "translate_with_axis": {
+                  if (this.interface_state.selected_object_state.axis !== null) {
+                    const o = this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!;
+                    const mouse_delta = vec2.sub(vec2.create(), input.location, this.interface_state.selected_object_state.mouse_start);
+                    const translation = vec3.clone(o.translation);
+                    translation[axisNameToIdx(this.interface_state.selected_object_state.axis)] += mouse_delta[0] * 0.01;
+                    this.gsRendererEngine.setPositionObject(this.interface_state.selected_object_id, translation);
+                  }
+                  break;
+                }
+                default: {
+                  break;
+                }
+              }
+              break;
+            }
+            default: {
+              break;
+            }
+          }
+          break;
         }
       }
-      if (old_selected_object_id == nearest_depth_obj) {
-        // deselect
-        this.selected_object_id = null;
-      } else {
-        // select
-        this.selected_object_id = nearest_depth_obj;
-      }
-      this.click_location = null;
     }
-
-    // handle modes
-    switch (this.edit_mode) {
-      case null:
-        break;
-      case "translate":
-        if (this.selected_object_id !== null) {
-          const o = this.gsRendererEngine.getObject(this.selected_object_id)!;
-          this.gsRendererEngine.translateObject(this.selected_object_id, vec3.fromValues(o.translate[0], o.translate[1], o.translate[2] + 0.01));
-        }
-        break;
-      case "rotate":
-        if (this.selected_object_id !== null) {
-          const o = this.gsRendererEngine.getObject(this.selected_object_id)!;
-          this.gsRendererEngine.rotateObject(this.selected_object_id, quat.mul(quat.create(), o.rotate, quat.fromEuler(quat.create(), 0, 1, 0)));
-          // this.gsRendererEngine.rotateObject(this.selected_object_id, quat.fromEuler(quat.create(), 0, 0.9, 0));
-
-        }
-        break;
-    }
+    this.interface_inputs = [];
 
     // render gaussians to texture
-    this.gsRendererEngine.render(this.camera, this.selected_object_id);
+    const selected_object_id = this.interface_state.kind === "selected_object_interface"
+      ? this.interface_state.selected_object_id
+      : null;
+    this.gsRendererEngine.render(this.camera, selected_object_id);
 
     // copy color texture
     const color_tex_data = new Uint8Array(this.gsRendererEngine.get_xsize() * this.gsRendererEngine.get_ysize() * 4);

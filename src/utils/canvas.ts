@@ -1,18 +1,16 @@
-export type Point = {
-  x: number,
-  y: number
-}
+import { vec2 } from "gl-matrix";
 
 export class CanvasMouseTracker {
   private canvas: HTMLCanvasElement;
 
   // mouse status
-  public mousePos: { current: Point, previous: Point } | null = null;
+  public mousePos: { current: vec2, previous: vec2 } | null = null;
 
-  mouseDownListeners: Array<(p: Point) => void> = [];
-  mouseMoveListeners: Array<(p: Point) => void> = [];
-  mouseUpListeners: Array<(p: Point) => void> = [];
-  mouseClickListeners: Array<(p: Point) => void> = [];
+  mouseDownListeners: Array<(p: vec2) => void> = [];
+  mouseDragListeners: Array<(p: vec2) => void> = [];
+  mouseMoveListeners: Array<(p: vec2) => void> = [];
+  mouseUpListeners: Array<(p: vec2) => void> = [];
+  mouseClickListeners: Array<(p: vec2) => void> = [];
   keyDownListeners: Array<(e: string) => void> = [];
 
   constructor(ctx: HTMLCanvasElement) {
@@ -20,7 +18,7 @@ export class CanvasMouseTracker {
 
     // add canvas handler
     this.canvas.addEventListener('pointerdown', this.handleMouseDown);
-    this.canvas.addEventListener('pointermove', this.handleMouseMove);
+    this.canvas.addEventListener('pointermove', this.handleMouseDrag);
     window.addEventListener('pointerup', this.handleMouseUp);
     this.canvas.addEventListener('dblclick', this.handleMouseClick);
     this.canvas.addEventListener('keydown', this.handleKeyDown);
@@ -31,26 +29,28 @@ export class CanvasMouseTracker {
     this.canvas.addEventListener("touchcancel", this.discardTouchEvent)
   }
 
-  addMouseDownListener = (f: (p: Point) => void) => { this.mouseDownListeners.push(f) };
-  removeMouseDownListener = (f: (p: Point) => void) => { this.mouseDownListeners = this.mouseDownListeners.filter(x => x !== f) };
-  addMouseMoveListener = (f: (p: Point) => void) => { this.mouseMoveListeners.push(f) };
-  removeMouseMoveListener = (f: (p: Point) => void) => { this.mouseMoveListeners = this.mouseMoveListeners.filter(x => x !== f) };
-  addMouseUpListener = (f: (p: Point) => void) => { this.mouseUpListeners.push(f) };
-  removeMouseUpListener = (f: (p: Point) => void) => { this.mouseUpListeners = this.mouseUpListeners.filter(x => x !== f) };
-  addMouseClickListener = (f: (p: Point) => void) => { this.mouseClickListeners.push(f) };
-  removeMouseClickListener = (f: (p: Point) => void) => { this.mouseClickListeners = this.mouseClickListeners.filter(x => x !== f) };
+  addMouseDownListener = (f: (p: vec2) => void) => { this.mouseDownListeners.push(f) };
+  removeMouseDownListener = (f: (p: vec2) => void) => { this.mouseDownListeners = this.mouseDownListeners.filter(x => x !== f) };
+  addMouseDragListener = (f: (p: vec2) => void) => { this.mouseDragListeners.push(f) };
+  removeMouseDragListener = (f: (p: vec2) => void) => { this.mouseDragListeners = this.mouseDragListeners.filter(x => x !== f) };
+  addMouseMoveListener = (f: (p: vec2) => void) => { this.mouseMoveListeners.push(f) };
+  removeMouseMoveListener = (f: (p: vec2) => void) => { this.mouseMoveListeners = this.mouseMoveListeners.filter(x => x !== f) };
+  addMouseUpListener = (f: (p: vec2) => void) => { this.mouseUpListeners.push(f) };
+  removeMouseUpListener = (f: (p: vec2) => void) => { this.mouseUpListeners = this.mouseUpListeners.filter(x => x !== f) };
+  addMouseClickListener = (f: (p: vec2) => void) => { this.mouseClickListeners.push(f) };
+  removeMouseClickListener = (f: (p: vec2) => void) => { this.mouseClickListeners = this.mouseClickListeners.filter(x => x !== f) };
   addKeyDownListener = (f: (s: string) => void) => { this.keyDownListeners.push(f) };
   removeKeyDownListener = (f: (s: string) => void) => { this.keyDownListeners = this.keyDownListeners.filter(x => x !== f) };
 
-  private getMousePos(canvas: HTMLCanvasElement, evt: MouseEvent) {
+  private getMousePos(canvas: HTMLCanvasElement, evt: MouseEvent): vec2 {
     const rect = canvas.getBoundingClientRect(); // abs. size of element
     const scaleX = canvas.width / rect.width;    // relationship bitmap vs. element for X
     const scaleY = canvas.height / rect.height;  // relationship bitmap vs. element for Y
 
-    return {
-      x: (evt.clientX - rect.left) * scaleX,   // scale mouse coordinates after they have
-      y: (evt.clientY - rect.top) * scaleY     // been adjusted to be relative to element
-    }
+    return [
+      (evt.clientX - rect.left) * scaleX,   // scale mouse coordinates after they have
+      (evt.clientY - rect.top) * scaleY     // been adjusted to be relative to element
+    ]
   }
 
   handleMouseDown = (e: MouseEvent) => {
@@ -71,16 +71,19 @@ export class CanvasMouseTracker {
     }
   }
 
-  handleMouseMove = (e: MouseEvent) => {
+  handleMouseDrag = (e: MouseEvent) => {
+    const v = this.getMousePos(this.canvas, e);
+    for (const f of this.mouseMoveListeners) {
+      f(v);
+    }
     if (!this.mousePos) {
       return;
     }
-    const v = this.getMousePos(this.canvas, e);
     this.mousePos = {
       current: v,
       previous: this.mousePos.current
     };
-    for (const f of this.mouseMoveListeners) {
+    for (const f of this.mouseDragListeners) {
       f(v);
     }
   }
@@ -103,7 +106,7 @@ export class CanvasMouseTracker {
   cleanup = () => {
     // remove listeners on canvas
     this.canvas.removeEventListener('pointerdown', this.handleMouseDown);
-    this.canvas.removeEventListener('pointermove', this.handleMouseMove);
+    this.canvas.removeEventListener('pointermove', this.handleMouseDrag);
     window.removeEventListener('pointerup', this.handleMouseUp);
     this.canvas.removeEventListener('dblclick', this.handleMouseClick);
     this.canvas.removeEventListener('keydown', this.handleKeyDown);
