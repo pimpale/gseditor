@@ -786,7 +786,7 @@ class OverlayEngine {
     );
   }
 
-  
+
   buildBuffers = (drawables: DrawableObject[]): [Float32Array, Float32Array, number] => {
     const n_vertexes = drawables.reduce((acc, obj) => acc + obj.vertexes.length, 0);
     const positions = new Float32Array(n_vertexes * 3);
@@ -1082,13 +1082,15 @@ type RotateSelectedObjectState = {
 type TranslateWithAxisSelectedObjectState = {
   kind: "translate_with_axis",
   axis: "x" | "y" | "z",
-  mouse_start: vec2
+  mouse_start: vec2,
+  pos_start: vec3
 }
 
 type RotateWithAxisSelectedObjectState = {
   kind: "rotate_with_axis",
   axis: "x" | "y" | "z",
-  mouse_start: vec2
+  mouse_start: vec2,
+  quat_start: quat
 }
 
 type SelectedObjectInterfaceState = {
@@ -1374,9 +1376,19 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                 case "z": {
                   const axis = input.key as "x" | "y" | "z";
                   if (this.interface_state.selected_object_state.kind === "rotate") {
-                    this.interface_state.selected_object_state = { kind: "rotate_with_axis", axis, mouse_start: this.interface_state.last_mouse_pos };
+                    this.interface_state.selected_object_state = {
+                      kind: "rotate_with_axis",
+                      axis,
+                      quat_start: this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!.rotation,
+                      mouse_start: this.interface_state.last_mouse_pos
+                    };
                   } else if (this.interface_state.selected_object_state.kind === "translate") {
-                    this.interface_state.selected_object_state = { kind: "translate_with_axis", axis, mouse_start: this.interface_state.last_mouse_pos };
+                    this.interface_state.selected_object_state = {
+                      kind: "translate_with_axis",
+                      axis,
+                      pos_start: this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!.translation,
+                      mouse_start: this.interface_state.last_mouse_pos
+                    };
                   }
                   break;
                 }
@@ -1416,18 +1428,16 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
               switch (this.interface_state.selected_object_state.kind) {
                 case "rotate_with_axis": {
                   if (this.interface_state.selected_object_state.axis !== null) {
-                    const o = this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!;
                     const mouse_delta = vec2.sub(vec2.create(), input.location, this.interface_state.selected_object_state.mouse_start);
-                    const rotation = quat.setAxisAngle(quat.create(), axisNameToVec3(this.interface_state.selected_object_state.axis), mouse_delta[0] * 0.0001);
-                    this.gsRendererEngine.setRotationObject(this.interface_state.selected_object_id, quat.mul(quat.create(), o.rotation, rotation));
+                    const rotation = quat.setAxisAngle(quat.create(), axisNameToVec3(this.interface_state.selected_object_state.axis), mouse_delta[0] * 0.01);
+                    this.gsRendererEngine.setRotationObject(this.interface_state.selected_object_id, quat.mul(quat.create(), this.interface_state.selected_object_state.quat_start, rotation));
                   }
                   break;
                 }
                 case "translate_with_axis": {
                   if (this.interface_state.selected_object_state.axis !== null) {
-                    const o = this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!;
                     const mouse_delta = vec2.sub(vec2.create(), input.location, this.interface_state.selected_object_state.mouse_start);
-                    const translation = vec3.clone(o.translation);
+                    const translation = vec3.clone(this.interface_state.selected_object_state.pos_start);
                     translation[axisNameToIdx(this.interface_state.selected_object_state.axis)] += mouse_delta[0] * 0.01;
                     this.gsRendererEngine.setPositionObject(this.interface_state.selected_object_id, translation);
                   }
