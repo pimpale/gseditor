@@ -1,7 +1,7 @@
 import React from "react";
 import { createShader, createProgram, createTexture, createRGBA32FTexture, createDepth32FTexture, createR32UITexture, } from '../utils/webgl';
 import { Camera, TrackballCamera, } from '../utils/camera';
-import { mat4, quat, vec2, vec3 } from 'gl-matrix';
+import { mat3, mat4, quat, vec2, vec3 } from 'gl-matrix';
 import { arrayMax, deg2rad } from "../utils/math";
 import { GaussianObjectInput, loadPly } from "./gaussian_renderer_utils/sceneLoader";
 import Form from 'react-bootstrap/Form';
@@ -208,7 +208,7 @@ void main() {
     // highlight selected object
     vec3 color = splat_color;
     if (selectedObjectRenderMode == 2u && objId == selectedObjectId) {
-      color = mix(splat_color, vec3(1.0, 0.0, 0.0), mod(time + gl_FragCoord.x/10.0 + gl_FragCoord.y/10.0, 1.0));
+      color = mix(splat_color, vec3(1.0, 0.0, 0.0), mod(time + gl_FragCoord.x/10.0 + gl_FragCoord.y/10.0, 0.5));
     }
 
     // Resample using conic matrix (cf. "Surface 
@@ -242,7 +242,7 @@ void main() {
 }`;
 
 
-const invertRow = (mat: mat4, row: number) => {
+const invertRowMat4 = (mat: mat4, row: number) => {
   mat[row + 0] = -mat[row + 0]
   mat[row + 4] = -mat[row + 4]
   mat[row + 8] = -mat[row + 8]
@@ -254,9 +254,9 @@ const convertViewMatrixTargetCoordinateSystem = (vm: Readonly<mat4>) => {
   // copy the view matrix
   const viewMatrix = mat4.clone(vm)
 
-  invertRow(viewMatrix, 0) // NOTE: inverting the x axis is webgl specific
-  invertRow(viewMatrix, 1)
-  invertRow(viewMatrix, 2)
+  invertRowMat4(viewMatrix, 0) // NOTE: inverting the x axis is webgl specific
+  invertRowMat4(viewMatrix, 1)
+  invertRowMat4(viewMatrix, 2)
 
   return viewMatrix;
 }
@@ -265,11 +265,12 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
   // copy the viewProjMatrix
   const viewProjMatrix = mat4.clone(vpm)
 
-  invertRow(viewProjMatrix, 0) // NOTE: inverting the x axis is webgl specific
-  invertRow(viewProjMatrix, 1)
+  invertRowMat4(viewProjMatrix, 0) // NOTE: inverting the x axis is webgl specific
+  invertRowMat4(viewProjMatrix, 1)
 
   return viewProjMatrix;
 }
+
 
 type GaussianRendererEngineSceneObject = {
   translation: vec3,
@@ -456,6 +457,13 @@ class GaussianRendererEngine {
     this.needs_rebuild = true;
   }
 
+  private mode = 0;
+
+  incrementMode = () => {
+    this.mode = (this.mode + 1) % 4;
+    this.needs_rebuild = true;
+  }
+
   doWorkerSort = (viewProjMatrix: mat4) => {
     this.sortWorkerBusy = true;
     this.lastSortedViewProjMatrix = viewProjMatrix;
@@ -463,7 +471,8 @@ class GaussianRendererEngine {
     this.sortWorker.postMessage({
       viewMatrix: this.lastSortedViewProjMatrix,
       sortingAlgorithm: 'count sort',
-      sceneGraph: this.sceneGraph
+      sceneGraph: this.sceneGraph,
+      mode: this.mode
     });
   }
 
@@ -1318,7 +1327,6 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     return nearest_depth_obj;
   }
 
-
   animationLoop = () => {
     this.camera.update();
     this.gsRendererEngine.update(this.camera);
@@ -1326,7 +1334,6 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     // process inputs
     for (const input of this.interface_inputs) {
       console.log(this.interface_state)
-      console.log(input);
       switch (input.kind) {
         case "mouseclick": {
           switch (this.interface_state.kind) {
@@ -1363,6 +1370,10 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
           switch (this.interface_state.kind) {
             case "selected_object_interface": {
               switch (input.key) {
+                case "m": {
+                  this.gsRendererEngine.incrementMode();
+                  break;
+                }
                 case "r": {
                   this.interface_state.selected_object_state = { kind: "rotate", };
                   break;
@@ -1472,10 +1483,10 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA, this.gl.UNSIGNED_BYTE, color_tex_data);
 
     //// copy depth texture
-    //const depth_tex_data = new Float32Array(this.gsRendererEngine.get_xsize() * this.gsRendererEngine.get_ysize() * 4);
-    //this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.gsRendererEngine.fbo);
-    //this.gl.readBuffer(this.gl.COLOR_ATTACHMENT1);
-    //this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA, this.gl.FLOAT, depth_tex_data);
+    const depth_tex_data = new Float32Array(this.gsRendererEngine.get_xsize() * this.gsRendererEngine.get_ysize() * 4);
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.gsRendererEngine.fbo);
+    this.gl.readBuffer(this.gl.COLOR_ATTACHMENT1);
+    this.gl.readPixels(0, 0, this.gsRendererEngine.get_xsize(), this.gsRendererEngine.get_ysize(), this.gl.RGBA, this.gl.FLOAT, depth_tex_data);
 
     // visualize textures
     this.visualizeTexture(this.gsColorVizData, color_tex_data);

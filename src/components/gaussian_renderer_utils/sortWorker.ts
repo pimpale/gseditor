@@ -2,9 +2,25 @@ import { mat3, mat4, quat, vec3, vec4 } from "gl-matrix"
 import assert from "../../utils/assert"
 import { GaussianObjectInput } from "./sceneLoader"
 
+const invertRowMat3 = (mat: mat3, row: number) => {
+    mat[row + 0] = -mat[row + 0]
+    mat[row + 3] = -mat[row + 3]
+    mat[row + 6] = -mat[row + 6]
+}
+
+const convertQuaternionTargetCoordinateSystem = (q: Readonly<quat>) => {
+    const quat_matrix = mat3.fromQuat(mat3.create(), q);
+    // invertRowMat3(quat_matrix, 0) // NOTE: inverting the x axis is webgl specific
+    invertRowMat3(quat_matrix, 1)
+    invertRowMat3(quat_matrix, 2)
+    return quat.fromMat3(quat.create(), quat_matrix);
+}
+
+
 type SortWorkerInput = {
     viewMatrix: Float32Array
     sortingAlgorithm: string
+    mode: number,
     sceneGraph: Map<number, { translation: vec3, rotation: quat, object: GaussianObjectInput }>
 }
 
@@ -25,7 +41,7 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
 
     console.log("[Worker] Received message")
 
-    const { sceneGraph, viewMatrix, sortingAlgorithm } = event.data
+    const { sceneGraph, viewMatrix, sortingAlgorithm, mode } = event.data
 
     const start = performance.now()
 
@@ -64,7 +80,12 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
         const g_cov3Da = new Float32Array(g.count * 3)
         const g_cov3Db = new Float32Array(g.count * 3)
         for (let i = 0; i < g.count; i++) {
-            const rotation = quat.multiply(quat.create(), g.rotations.slice(i * 4, i * 4 + 4), value.rotation);
+            let rotation = g.rotations.slice(i * 4, i * 4 + 4);
+            if (mode == 0) {
+                quat.multiply(rotation, , convertQuaternionTargetCoordinateSystem(value.rotation));
+            } else if (mode == 1) {
+                quat.multiply(rotation, convertQuaternionTargetCoordinateSystem(value.rotation), g.rotations.slice(i * 4, i * 4 + 4));
+            }
             const [cov3Da, cov3Db] = computeCov3D(g.scales.slice(i * 3, i * 3 + 3), 1, rotation);
             g_cov3Da.set(cov3Da, i * 3)
             g_cov3Db.set(cov3Db, i * 3)
