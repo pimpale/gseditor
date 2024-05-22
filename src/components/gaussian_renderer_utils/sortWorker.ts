@@ -2,20 +2,49 @@ import { mat3, mat4, quat, vec3, vec4 } from "gl-matrix"
 import assert from "../../utils/assert"
 import { GaussianObjectInput } from "./sceneLoader"
 
-const invertRowMat3 = (mat: mat3, row: number) => {
-    mat[row + 0] = -mat[row + 0]
-    mat[row + 3] = -mat[row + 3]
-    mat[row + 6] = -mat[row + 6]
+
+const convertQuatTargetCoordinateSystem = (q: Readonly<quat>) => {
+    const ret = mat3.fromQuat(mat3.create(), q);
+
+    const ply_to_targ = mat3.fromValues(
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1
+    );
+
+    mat3.multiply(ret, ret, ply_to_targ);
+
+
+    return quat.normalize(quat.create(), quat.fromMat3(quat.create(), ret));
 }
 
-const convertQuaternionTargetCoordinateSystem = (q: Readonly<quat>) => {
-    const quat_matrix = mat3.fromQuat(mat3.create(), q);
-    // invertRowMat3(quat_matrix, 0) // NOTE: inverting the x axis is webgl specific
-    invertRowMat3(quat_matrix, 1)
-    invertRowMat3(quat_matrix, 2)
-    return quat.fromMat3(quat.create(), quat_matrix);
+const convertFromQuatTargetCoordinateSystem = (q: Readonly<quat>) => {
+    const ret = mat3.fromQuat(mat3.create(), q);
+
+    const targ_to_ply =  mat3.fromValues(
+        1, 0, 0,
+        0, -1, 0,
+        0, 0, -1
+    );
+
+    mat3.multiply(ret, ret, targ_to_ply);
+
+    return quat.normalize(quat.create(), quat.fromMat3(quat.create(), ret));
 }
 
+
+const convertQuatTargetCoordinateSystemMat3 = (q: Readonly<quat>) : mat3=> {
+    const ret = mat3.fromQuat(mat3.create(), q);
+
+    const ply_to_targ = mat3.fromValues(
+        -1, 0, 0,
+        0, -1, 0,
+        0, 0, 1
+    );
+    mat3.multiply(ret, ret, ply_to_targ);
+    // console.log(mat3.determinant(ret))
+    return ret;
+}
 
 type SortWorkerInput = {
     viewMatrix: Float32Array
@@ -67,10 +96,13 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
         gaussians.colors.set(g.colors, offset * 3)
         gaussians.opacities.set(g.opacities, offset)
 
+        let transform = mat4.fromRotationTranslation(mat4.create(), value.rotation, value.translation);
+
+        console.log("mode", mode)
+
         const g_positions = new Float32Array(g.count * 3);
         for (let i = 0; i < g.count; i++) {
-            const pos = vec3.transformQuat(vec3.create(), g.positions.slice(i * 3, i * 3 + 3), value.rotation)
-            vec3.add(pos, pos, value.translation)
+            const pos = vec3.transformMat4(vec3.create(), g.positions.slice(i * 3, i * 3 + 3), transform);
             g_positions.set(pos, i * 3)
             gaussians.sceneMin = gaussians.sceneMin.map((v, j) => Math.min(v, pos[j]))
             gaussians.sceneMax = gaussians.sceneMax.map((v, j) => Math.max(v, pos[j]))
@@ -80,13 +112,12 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
         const g_cov3Da = new Float32Array(g.count * 3)
         const g_cov3Db = new Float32Array(g.count * 3)
         for (let i = 0; i < g.count; i++) {
-            let rotation = g.rotations.slice(i * 4, i * 4 + 4);
-            if (mode == 0) {
-                quat.multiply(rotation, , convertQuaternionTargetCoordinateSystem(value.rotation));
-            } else if (mode == 1) {
-                quat.multiply(rotation, convertQuaternionTargetCoordinateSystem(value.rotation), g.rotations.slice(i * 4, i * 4 + 4));
-            }
-            const [cov3Da, cov3Db] = computeCov3D(g.scales.slice(i * 3, i * 3 + 3), 1, rotation);
+
+            let r2 = g.rotations.slice(i * 4, i * 4 + 4);
+            const [cov3Da, cov3Db] = computeCov3D(g.scales.slice(i * 3, i * 3 + 3), 1, r2);
+
+            // let rotation = convertQuatTargetCoordinateSystemMat3(g.rotations.slice(i * 4, i * 4 + 4));
+            // const [cov3Da, cov3Db] = computeCov3D_2(g.scales.slice(i * 3, i * 3 + 3), 1, rotation);
             g_cov3Da.set(cov3Da, i * 3)
             g_cov3Db.set(cov3Db, i * 3)
         }
@@ -164,9 +195,9 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
 function sortGaussiansByDepth(gaussian_positions: Float32Array, viewMatrix: Float32Array, sortingAlgorithm: string): Uint32Array {
     const n_gaussians = gaussian_positions.length / 3
 
-    const calcDepth = (i: number) => gaussian_positions[i * 3] * viewMatrix[2] +
-        gaussian_positions[i * 3 + 1] * viewMatrix[6] +
-        gaussian_positions[i * 3 + 2] * viewMatrix[10]
+    const calcDepth = (i: number) => -gaussian_positions[i * 3] * viewMatrix[2] +
+        -gaussian_positions[i * 3 + 1] * viewMatrix[6] +
+        -gaussian_positions[i * 3 + 2] * viewMatrix[10]
 
     const depthIndex = new Uint32Array(n_gaussians)
 
@@ -249,10 +280,42 @@ function partition(A: Float32Array, B: Float32Array | Uint32Array, lo: number, h
 }
 
 
+
 // Converts scale and rotation properties of each
 // Gaussian to a 3D covariance matrix in world space.
 // Original CUDA implementation: https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu#L118
-function computeCov3D(scale: vec3, mod: number, rot: vec4): [number[], number[]] {
+function computeCov3D_2(scale: vec3, mod: number, R: mat3): [number[], number[]] {
+    const S = mat3.create()
+    const M = mat3.create()
+    const Sigma = mat3.create()
+
+    // Create scaling matrix
+    mat3.set(S,
+        mod * scale[0], 0, 0,
+        0, mod * scale[1], 0,
+        0, 0, mod * scale[2]
+    );
+
+    // Sigma = R S S^T R^T
+    // = R S (R S)^T
+
+    mat3.multiply(M, S, R)  // M = S * R
+
+    // Compute 3D world covariance matrix Sigma
+    mat3.multiply(Sigma, mat3.transpose(mat3.create(), M), M)  // Sigma = transpose(M) * M
+
+    // Covariance is symmetric, only store upper right
+    return [
+        [Sigma[0], Sigma[1], Sigma[2]],
+        [Sigma[4], Sigma[5], Sigma[8]]
+    ]
+}
+
+
+// Converts scale and rotation properties of each
+// Gaussian to a 3D covariance matrix in world space.
+// Original CUDA implementation: https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu#L118
+function computeCov3D_3(scale: vec3, mod: number, rot: vec4, rot2: mat3): [number[], number[]] {
     const tmp = mat3.create()
     const S = mat3.create()
     const R = mat3.create()
@@ -276,6 +339,60 @@ function computeCov3D(scale: vec3, mod: number, rot: vec4): [number[], number[]]
         1. - 2. * (y * y + z * z), 2. * (x * y - r * z), 2. * (x * z + r * y),
         2. * (x * y + r * z), 1. - 2. * (x * x + z * z), 2. * (y * z - r * x),
         2. * (x * z - r * y), 2. * (y * z + r * x), 1. - 2. * (x * x + y * y)
+    )
+
+    // mat3.multiply(M, S, R)  // M = S * R
+
+    mat3.multiply(M, mat3.multiply(tmp, S, R), rot2)  // M = S * R * R2
+
+
+    // Compute 3D world covariance matrix Sigma
+    mat3.multiply(Sigma, mat3.transpose(tmp, M), M)  // Sigma = transpose(M) * M
+
+    // Covariance is symmetric, only store upper right
+    return [
+        [Sigma[0], Sigma[1], Sigma[2]],
+        [Sigma[4], Sigma[5], Sigma[8]]
+    ]
+}
+
+
+function myQuatToMat3(rot: vec4): mat3 {
+    const R = mat3.create()
+    const r = rot[0]
+    const x = rot[1]
+    const y = rot[2]
+    const z = rot[3]
+
+    // Compute rotation matrix from quaternion
+    mat3.set(R,
+        1. - 2. * (y * y + z * z), 2. * (x * y - r * z), 2. * (x * z + r * y),
+        2. * (x * y + r * z), 1. - 2. * (x * x + z * z), 2. * (y * z - r * x),
+        2. * (x * z - r * y), 2. * (y * z + r * x), 1. - 2. * (x * x + y * y)
+    );
+
+    // console.log(R)
+
+    return R;
+}
+
+
+// Converts scale and rotation properties of each
+// Gaussian to a 3D covariance matrix in world space.
+// Original CUDA implementation: https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu#L118
+function computeCov3D(scale: vec3, mod: number, rot: vec4): [number[], number[]] {    
+    const tmp = mat3.create()
+    const S = mat3.create()
+    // const R = myQuatToMat3(rot)
+    const R = mat3.transpose(mat3.create(), mat3.fromQuat(mat3.create(), rot))
+    const M = mat3.create()
+    const Sigma = mat3.create()
+
+    // Create scaling matrix
+    mat3.set(S,
+        mod * scale[0], 0, 0,
+        0, mod * scale[1], 0,
+        0, 0, mod * scale[2]
     )
 
     mat3.multiply(M, S, R)  // M = S * R

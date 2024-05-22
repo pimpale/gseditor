@@ -1,4 +1,4 @@
-import { mat3, vec3, vec4 } from 'gl-matrix';
+import { mat3, quat, vec3, vec4 } from 'gl-matrix';
 
 // a raw input object
 export type GaussianObjectInput = {
@@ -14,7 +14,6 @@ export type GaussianObjectInput = {
     // gaussian scales, size 3 * gaussianCount
     scales: Float32Array
 }
-
 
 // Load all gaussian data from a point-cloud file
 // Original C++ implementation: https://gitlab.inria.fr/sibr/sibr_core/-/blob/gaussian_code_release_union/src/projects/gaussianviewer/renderer/GaussianView.cpp#L70
@@ -88,7 +87,7 @@ export function loadPly(content: ArrayBuffer): GaussianObjectInput {
         const length = Math.sqrt(length2)
 
         rotation = rotation.map(v => v / length)
-        rotations.push(...rotation)
+        rotations.push(rotation[1], rotation[2], rotation[3], rotation[0])
 
         // Exponentiate scale
         scale = scale.map(v => Math.exp(v))

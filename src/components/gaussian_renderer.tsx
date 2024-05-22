@@ -208,7 +208,7 @@ void main() {
     // highlight selected object
     vec3 color = splat_color;
     if (selectedObjectRenderMode == 2u && objId == selectedObjectId) {
-      color = mix(splat_color, vec3(1.0, 0.0, 0.0), mod(time + gl_FragCoord.x/10.0 + gl_FragCoord.y/10.0, 0.5));
+      color = mix(splat_color, vec3(1.0, 0.0, 0.0), 0.1*mod(time + gl_FragCoord.x/10.0 + gl_FragCoord.y/10.0, 1.0));
     }
 
     // Resample using conic matrix (cf. "Surface 
@@ -254,9 +254,9 @@ const convertViewMatrixTargetCoordinateSystem = (vm: Readonly<mat4>) => {
   // copy the view matrix
   const viewMatrix = mat4.clone(vm)
 
-  invertRowMat4(viewMatrix, 0) // NOTE: inverting the x axis is webgl specific
-  invertRowMat4(viewMatrix, 1)
-  invertRowMat4(viewMatrix, 2)
+  // invertRowMat4(viewMatrix, 0) // NOTE: inverting the x axis is webgl specific
+  // invertRowMat4(viewMatrix, 1)
+  // invertRowMat4(viewMatrix, 2)
 
   return viewMatrix;
 }
@@ -265,8 +265,8 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
   // copy the viewProjMatrix
   const viewProjMatrix = mat4.clone(vpm)
 
-  invertRowMat4(viewProjMatrix, 0) // NOTE: inverting the x axis is webgl specific
-  invertRowMat4(viewProjMatrix, 1)
+  // invertRowMat4(viewProjMatrix, 0) // NOTE: inverting the x axis is webgl specific
+  // invertRowMat4(viewProjMatrix, 1)
 
   return viewProjMatrix;
 }
@@ -460,7 +460,7 @@ class GaussianRendererEngine {
   private mode = 0;
 
   incrementMode = () => {
-    this.mode = (this.mode + 1) % 4;
+    this.mode = (this.mode + 1) % 16;
     this.needs_rebuild = true;
   }
 
@@ -1440,7 +1440,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                 case "rotate_with_axis": {
                   if (this.interface_state.selected_object_state.axis !== null) {
                     const mouse_delta = vec2.sub(vec2.create(), input.location, this.interface_state.selected_object_state.mouse_start);
-                    const rotation = quat.setAxisAngle(quat.create(), axisNameToVec3(this.interface_state.selected_object_state.axis), mouse_delta[0] * 0.01);
+                    const rotation = quat.setAxisAngle(quat.create(), axisNameToVec3(this.interface_state.selected_object_state.axis), mouse_delta[0] * 0.02);
                     this.gsRendererEngine.setRotationObject(this.interface_state.selected_object_id, quat.mul(quat.create(), this.interface_state.selected_object_state.quat_start, rotation));
                   }
                   break;
@@ -1490,7 +1490,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
 
     // visualize textures
     this.visualizeTexture(this.gsColorVizData, color_tex_data);
-    // this.visualizeTexture(this.gsDepthVizData, this.convertRGBA32Tex(depth_tex_data));
+    this.visualizeTexture(this.gsDepthVizData, this.convertRGBA32Tex(depth_tex_data));
 
     // render overlay to texture
     this.overlayEngine.render(this.camera);
