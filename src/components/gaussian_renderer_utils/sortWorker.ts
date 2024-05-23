@@ -5,7 +5,6 @@ import { GaussianObjectInput } from "./sceneLoader"
 type SortWorkerInput = {
     viewMatrix: Float32Array
     sortingAlgorithm: string
-    mode: number,
     sceneGraph: Map<number, { translation: vec3, rotation: quat, object: GaussianObjectInput }>
 }
 
@@ -26,7 +25,7 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
 
     console.log("[Worker] Received message")
 
-    const { sceneGraph, viewMatrix, sortingAlgorithm, mode } = event.data
+    const { sceneGraph, viewMatrix, sortingAlgorithm } = event.data
 
     const start = performance.now()
 
@@ -140,14 +139,12 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
     ])
 }
 
-
-
 function sortGaussiansByDepth(gaussian_positions: Float32Array, viewMatrix: Float32Array, sortingAlgorithm: string): Uint32Array {
     const n_gaussians = gaussian_positions.length / 3
 
-    const calcDepth = (i: number) => -gaussian_positions[i * 3] * viewMatrix[2] +
-        -gaussian_positions[i * 3 + 1] * viewMatrix[6] +
-        -gaussian_positions[i * 3 + 2] * viewMatrix[10]
+    const calcDepth = (i: number) => gaussian_positions[i * 3] * viewMatrix[2] +
+        gaussian_positions[i * 3 + 1] * viewMatrix[6] +
+        gaussian_positions[i * 3 + 2] * viewMatrix[10]
 
     const depthIndex = new Uint32Array(n_gaussians)
 
