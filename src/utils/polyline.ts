@@ -70,7 +70,7 @@
 //     vertexes
 // }
 
-import {vec3} from 'gl-matrix';
+import { quat, vec3 } from 'gl-matrix';
 import { Vertex } from './vertex';
 
 export function polyline_facing_point(
@@ -85,7 +85,7 @@ export function polyline_facing_point(
         normals.push(vec3.normalize(vec3.create(), vec3.subtract(vec3.create(), reference_point, points[i])));
     }
     return polyline(points, normals, width, colors);
-} 
+}
 
 
 export function polyline(
@@ -108,7 +108,7 @@ export function polyline(
     }
     // find the vector of each line segment
     let dposition_per_segment: vec3[] = [];
-    for(let i = 0; i < points.length-1; i++) {
+    for (let i = 0; i < points.length - 1; i++) {
         dposition_per_segment.push(vec3.subtract(vec3.create(), points[i + 1], points[i]));
     }
 
@@ -129,7 +129,7 @@ export function polyline(
     let right_points: vec3[] = cross_vectors.map((v, i) => vec3.add(vec3.create(), points[i], vec3.scale(vec3.create(), v, width[i])));
 
     let vertexes: Vertex[] = [];
-    for(let i = 0; i < left_points.length-1; i++) {
+    for (let i = 0; i < left_points.length - 1; i++) {
         vertexes.push({
             position: right_points[i],
             color: colors[i],
@@ -156,4 +156,57 @@ export function polyline(
         });
     }
     return vertexes;
+}
+
+// returns a set of ts and widths along an implicit parameter t ranging from 0 to 1 that could be used to make an arrow
+export function arrowWidths(bodyWidth: number, headWidth: number, nTailSegments: number, nHeadSegments: number,): { t: number, width: number }[] {
+    const tailProp = nTailSegments / (nTailSegments + nHeadSegments);
+    const headProp = nHeadSegments / (nTailSegments + nHeadSegments);
+    
+    const data: { t: number, width: number }[] = [];
+    // create tail segments
+    let offset = 0;
+    for (let i = 0; i < nTailSegments; i++) {
+        data.push({ t: offset, width: bodyWidth });
+        if(i != nTailSegments-1) {
+            offset += tailProp / nTailSegments;
+        }
+    }
+    // create head segments
+    for (let i = 0; i < nHeadSegments+1; i++) {
+        const w = (nHeadSegments - i) / nHeadSegments;
+        data.push({ t: offset, width: headWidth*w });
+        offset += headProp / nHeadSegments;
+    }
+    return data;
+}
+
+export function arrowAroundPoint(
+    origin: vec3,
+    axis: vec3,
+    start: vec3,
+    width: number,
+    color: vec3,
+): Vertex[] {
+    const data = arrowWidths(width, 3 * width, 20, 5);
+
+    const displacement = vec3.subtract(vec3.create(), start, origin);
+
+
+    const points: vec3[] = []
+    const widths: number[] = []
+    for (const { t, width } of data) {
+        points.push(
+            vec3.transformQuat(
+                vec3.create(),
+                displacement,
+                quat.setAxisAngle(quat.create(), axis, 2 * Math.PI * t)
+            )
+        );
+        widths.push(width);
+    }
+
+    const colors = Array<vec3>(points.length - 1).fill(color);
+
+    return polyline_facing_point(points, widths, colors, origin);
 }

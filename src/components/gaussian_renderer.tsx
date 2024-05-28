@@ -7,7 +7,7 @@ import { GaussianObjectInput, loadPly } from "./gaussian_renderer_utils/sceneLoa
 import Form from 'react-bootstrap/Form';
 import { genPlane } from "../utils/uvplane";
 import { Vertex } from "../utils/vertex";
-import { polyline, polyline_facing_point } from "../utils/polyline";
+import { arrowAroundPoint, polyline, polyline_facing_point } from "../utils/polyline";
 import { ProcessedGaussianScene } from "./gaussian_renderer_utils/sortWorker";
 import assert from "../utils/assert";
 import { CanvasMouseTracker } from "../utils/canvas";
@@ -254,22 +254,13 @@ const invertRowMat4 = (mat: mat4, row: number) => {
 const convertViewMatrixTargetCoordinateSystem = (vm: Readonly<mat4>) => {
   // copy the view matrix
   const viewMatrix = mat4.clone(vm)
-
-  // invertRowMat4(viewMatrix, 0) // NOTE: inverting the x axis is webgl specific
-  // invertRowMat4(viewMatrix, 1)
   invertRowMat4(viewMatrix, 2)
-
   return viewMatrix;
 }
 
 const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) => {
   // copy the viewProjMatrix
   const viewProjMatrix = mat4.clone(vpm)
-
-  // invertRowMat4(viewProjMatrix, 0) // NOTE: inverting the x axis is webgl specific
-  // invertRowMat4(viewProjMatrix, 1)
-  // invertRowMat4(viewProjMatrix, 2)
-
   return viewProjMatrix;
 }
 
@@ -888,19 +879,6 @@ class OverlayEngine {
     this.gl.bindVertexArray(this.tri_vao);
     this.gl.drawArrays(this.gl.TRIANGLES, 0, this.tri_n_vertexes);
 
-
-    if(Math.random() > 0.99) {
-      for(const obj of this.objects.values()) {
-        // print out the view matrix transformed vertices
-        for(const vertex of obj.vertexes) {
-          const pos = vec3.transformMat4(vec3.create(), vertex.position, camera.viewMatrix());
-          console.log("1", pos);
-          const pos2 = vec3.transformMat4(vec3.create(), pos, camera.viewProjMatrix(this.xsize, this.ysize));
-          console.log("2", pos2);
-        }
-      }
-    }
-
     this.gl.bindVertexArray(this.line_vao);
     this.gl.drawArrays(this.gl.LINES, 0, this.line_n_vertexes);
 
@@ -1205,48 +1183,17 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.overlayEngine = new OverlayEngine(this.gl);
     this.compositor = new Compositor(this.gl);
 
-    this.overlayEngine.addObject(0, {
-      kind: "line",
-      translation: vec3.create(),
-      rotation: quat.create(),
-      vertexes: axesLines(4)
-    })
 
-    let circ_r2 = (theta: number): [number, number, number] => {
-      return [2 * Math.cos(theta), 0, 2 * Math.sin(theta)];
-    }
-    this.overlayEngine.addObject(1, {
+    this.overlayEngine.addObject(0, {
       kind: "triangle",
       translation: vec3.create(),
       rotation: quat.create(),
-      vertexes: polyline_facing_point(
-        // points in the line
-        [
-          circ_r2(0 / 6 * 2 * Math.PI),
-          circ_r2(1 / 6 * 2 * Math.PI),
-          circ_r2(2 / 6 * 2 * Math.PI),
-          circ_r2(3 / 6 * 2 * Math.PI),
-          circ_r2(4 / 6 * 2 * Math.PI),
-          circ_r2(5 / 6 * 2 * Math.PI),
-        ],
-        // width
-        [
-          0.1,
-          0.1,
-          0.1,
-          0.1,
-          0.1,
-          0.1,
-        ],
-        // colors
-        [
-          [1, 0, 0],
-          [0, 1, 0],
-          [0, 0, 1],
-          [1, 0, 0],
-          [0, 1, 0],
-        ],
-        [0, 0, 0]
+      vertexes: arrowAroundPoint(
+        vec3.fromValues(0, 0, 0),
+        vec3.fromValues(1, 0, 0),
+        vec3.fromValues(0, 2, 0),
+        0.3,
+        [1, 0, 0]
       )
     });
 
