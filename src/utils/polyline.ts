@@ -159,24 +159,25 @@ export function polyline(
 }
 
 // returns a set of ts and widths along an implicit parameter t ranging from 0 to 1 that could be used to make an arrow
-export function arrowWidths(bodyWidth: number, headWidth: number, nTailSegments: number, nHeadSegments: number,): { t: number, width: number }[] {
-    const tailProp = nTailSegments / (nTailSegments + nHeadSegments);
-    const headProp = nHeadSegments / (nTailSegments + nHeadSegments);
-    
-    const data: { t: number, width: number }[] = [];
-    // create tail segments
-    let offset = 0;
-    for (let i = 0; i < nTailSegments; i++) {
-        data.push({ t: offset, width: bodyWidth });
-        if(i != nTailSegments-1) {
-            offset += tailProp / nTailSegments;
+export function arrowWidths(bodyWidth: number, headWidth: number, prop: number, segments: number,): { t: number, width: number }[] {    
+    function arrowWidth(t:number) {
+        if (t < prop) {
+            return bodyWidth;
+        } else {
+            const slope = headWidth / (1 - prop);
+            return slope - slope * t;
         }
     }
-    // create head segments
-    for (let i = 0; i < nHeadSegments+1; i++) {
-        const w = (nHeadSegments - i) / nHeadSegments;
-        data.push({ t: offset, width: headWidth*w });
-        offset += headProp / nHeadSegments;
+    
+    const data: { t: number, width: number }[] = [];
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        data.push({ t, width: arrowWidth(t) });
+        const tnext = (i + 1) / segments;
+        if(t < prop && tnext >= prop) {
+            data.push({ t: prop, width: bodyWidth });
+            data.push({ t: prop+0.01, width: headWidth });
+        }
     }
     return data;
 }
@@ -188,7 +189,7 @@ export function arrowAroundPoint(
     width: number,
     color: vec3,
 ): Vertex[] {
-    const data = arrowWidths(width, 3 * width, 20, 5);
+    const data = arrowWidths(width, 3 * width, 0.8, 20);
 
     const displacement = vec3.subtract(vec3.create(), start, origin);
 
@@ -205,6 +206,9 @@ export function arrowAroundPoint(
         );
         widths.push(width);
     }
+
+    console.log(data)
+
 
     const colors = Array<vec3>(points.length - 1).fill(color);
 
