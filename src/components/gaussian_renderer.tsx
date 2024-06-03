@@ -788,8 +788,9 @@ class OverlayEngine {
 
     let offset = 0;
     for (const obj of drawables) {
+      const transform = mat4.fromRotationTranslationScale(mat4.create(), obj.rotation, obj.translation, vec3.fromValues(1, 1, 1));
       for (const vertex of obj.vertexes) {
-        positions.set(vertex.position, offset * 3);
+        positions.set(vec3.transformMat4(vec3.create(), vertex.position, transform), offset * 3);
         colors.set(vertex.color, offset * 3);
         offset += 1;
       }
@@ -1183,20 +1184,6 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
     this.overlayEngine = new OverlayEngine(this.gl);
     this.compositor = new Compositor(this.gl);
 
-
-    this.overlayEngine.addObject(0, {
-      kind: "triangle",
-      translation: vec3.create(),
-      rotation: quat.create(),
-      vertexes: arrowAroundPoint(
-        vec3.fromValues(0, 0, 0),
-        vec3.fromValues(1, 0, 0),
-        vec3.fromValues(0, 2, 0),
-        0.3,
-        [1, 0, 0]
-      )
-    });
-
     // set up viz canvases
     this.gsColorVizData = this.setupVizCanvas(this.gsEngineColorViz.current!);
     this.gsDepthVizData = this.setupVizCanvas(this.gsEngineDepthViz.current!);
@@ -1333,7 +1320,6 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
 
     // process inputs
     for (const input of this.interface_inputs) {
-      console.log(this.interface_state)
       switch (input.kind) {
         case "mouseclick": {
           switch (this.interface_state.kind) {
@@ -1373,16 +1359,29 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                 case "r": {
                   this.interface_state.selected_object_state = { kind: "rotate", };
                   this.overlayEngine.removeObject(this.interface_state.selected_object_id);
+
+                  let srcObj = this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!;
+
                   this.overlayEngine.addObject(this.interface_state.selected_object_id, {
                     kind: "line",
-                    translation: this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!.translation,
-                    rotation: quat.create(),
+                    translation: srcObj.translation,
+                    rotation: srcObj.rotation,
                     vertexes: axesLines(4)
                   })
                   break;
                 }
                 case "g": {
                   this.interface_state.selected_object_state = { kind: "translate", };
+                  this.overlayEngine.removeObject(this.interface_state.selected_object_id);
+
+                  let srcObj = this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!;
+
+                  this.overlayEngine.addObject(this.interface_state.selected_object_id, {
+                    kind: "line",
+                    translation: srcObj.translation,
+                    rotation: quat.create(),
+                    vertexes: axesLines(4)
+                  })
                   break;
                 }
                 case "x":
@@ -1446,6 +1445,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                     const mouse_delta = vec2.sub(vec2.create(), input.location, this.interface_state.selected_object_state.mouse_start);
                     const rotation = quat.setAxisAngle(quat.create(), axisNameToVec3(this.interface_state.selected_object_state.axis), mouse_delta[0] * 0.02);
                     this.gsRendererEngine.setRotationObject(this.interface_state.selected_object_id, quat.mul(quat.create(), this.interface_state.selected_object_state.quat_start, rotation));
+                    this.overlayEngine.setRotationObject(this.interface_state.selected_object_id, quat.mul(quat.create(), this.interface_state.selected_object_state.quat_start, rotation));
                   }
                   break;
                 }
@@ -1455,6 +1455,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                     const translation = vec3.clone(this.interface_state.selected_object_state.pos_start);
                     translation[axisNameToIdx(this.interface_state.selected_object_state.axis)] += mouse_delta[0] * 0.01;
                     this.gsRendererEngine.setPositionObject(this.interface_state.selected_object_id, translation);
+                    this.overlayEngine.setPositionObject(this.interface_state.selected_object_id, translation);
                   }
                   break;
                 }
