@@ -5,7 +5,7 @@ import { GaussianObjectInput } from "./sceneLoader"
 type SortWorkerInput = {
     viewMatrix: Float32Array
     sortingAlgorithm: string
-    sceneGraph: Map<number, { translation: vec3, rotation: quat, object: GaussianObjectInput }>
+    sceneGraph: Map<number, { translation: vec3, rotation: quat, scale: number, object: GaussianObjectInput }>
 }
 
 // a processed input object with object ids
@@ -51,11 +51,12 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
         gaussians.colors.set(g.colors, offset * 3)
         gaussians.opacities.set(g.opacities, offset)
 
+        const transform = mat4.fromRotationTranslationScale(mat4.create(), value.rotation, value.translation, vec3.fromValues(value.scale, value.scale, value.scale))
+
         const g_positions = new Float32Array(g.count * 3);
         for (let i = 0; i < g.count; i++) {
             const pos:vec3 = g.positions.slice(i * 3, i * 3 + 3);
-            vec3.transformQuat(pos, pos, value.rotation)
-            vec3.add(pos, pos, value.translation)
+            vec3.transformMat4(pos, pos, transform)
             g_positions.set(pos, i * 3)
             gaussians.sceneMin = gaussians.sceneMin.map((v, j) => Math.min(v, pos[j]))
             gaussians.sceneMax = gaussians.sceneMax.map((v, j) => Math.max(v, pos[j]))
@@ -66,8 +67,10 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
         const g_cov3Db = new Float32Array(g.count * 3)
         for (let i = 0; i < g.count; i++) {
             const rotation = quat.create();
-            quat.multiply(rotation, value.rotation, g.rotations.slice(i * 4, i * 4 + 4))
-            const [cov3Da, cov3Db] = computeCov3D_2(g.scales.slice(i * 3, i * 3 + 3), 1, rotation);
+            quat.multiply(rotation, value.rotation, g.rotations.slice(i * 4, i * 4 + 4));
+            const scale = vec3.create();
+            vec3.scale(scale, g.scales.slice(i * 3, i * 3 + 3), value.scale);
+            const [cov3Da, cov3Db] = computeCov3D_2(scale, 1, rotation);
             g_cov3Da.set(cov3Da, i * 3)
             g_cov3Db.set(cov3Db, i * 3)
         }

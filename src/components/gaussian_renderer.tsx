@@ -268,6 +268,7 @@ const convertViewProjectionMatrixTargetCoordinateSystem = (vpm: Readonly<mat4>) 
 type GaussianRendererEngineSceneObject = {
   translation: vec3,
   rotation: quat,
+  scale: number,
   object: GaussianObjectInput,
 }
 
@@ -422,8 +423,8 @@ class GaussianRendererEngine {
     return this.sceneGraph.get(id);
   }
 
-  addObject = (id: number, translate: vec3, rotate: quat, object: GaussianObjectInput) => {
-    this.sceneGraph.set(id, { translation: translate, rotation: rotate, object });
+  addObject = (id: number, translate: vec3, rotate: quat, scale:number, object: GaussianObjectInput) => {
+    this.sceneGraph.set(id, { translation: translate, rotation: rotate, object, scale });
     this.needs_rebuild = true;
   }
 
@@ -442,6 +443,15 @@ class GaussianRendererEngine {
       throw Error(`Object with id ${id} does not exist`)
     }
     obj.rotation = rotate;
+    this.needs_rebuild = true;
+  }
+
+  setScaleObject = (id: number, scale: number) => {
+    const obj = this.sceneGraph.get(id);
+    if (obj === undefined) {
+      throw Error(`Object with id ${id} does not exist`)
+    }
+    obj.scale = scale;
     this.needs_rebuild = true;
   }
 
@@ -668,6 +678,7 @@ type DrawableObject = {
   kind: "line" | "triangle",
   translation: vec3,
   rotation: quat,
+  scale: number,
   vertexes: Vertex[]
 }
 
@@ -788,7 +799,7 @@ class OverlayEngine {
 
     let offset = 0;
     for (const obj of drawables) {
-      const transform = mat4.fromRotationTranslationScale(mat4.create(), obj.rotation, obj.translation, vec3.fromValues(1, 1, 1));
+      const transform = mat4.fromRotationTranslationScale(mat4.create(), obj.rotation, obj.translation, vec3.fromValues(obj.scale, obj.scale, obj.scale));
       for (const vertex of obj.vertexes) {
         positions.set(vec3.transformMat4(vec3.create(), vertex.position, transform), offset * 3);
         colors.set(vertex.color, offset * 3);
@@ -854,6 +865,15 @@ class OverlayEngine {
       throw Error(`Object with id ${id} does not exist`)
     }
     obj.rotation = rotate;
+    this.needs_rebuild = true;
+  }
+
+  setScaleObject = (id: number, scale: number) => {
+    const obj = this.objects.get(id);
+    if (obj === undefined) {
+      throw Error(`Object with id ${id} does not exist`)
+    }
+    obj.scale = scale;
     this.needs_rebuild = true;
   }
 
@@ -1074,6 +1094,12 @@ type RotateSelectedObjectState = {
   kind: "rotate",
 }
 
+type ScaleSelectedObjectState = {
+  kind: "scale",
+  mouse_start: vec2,
+  scale_start: number
+}
+
 type TranslateWithAxisSelectedObjectState = {
   kind: "translate_with_axis",
   axis: "x" | "y" | "z",
@@ -1092,7 +1118,10 @@ type SelectedObjectInterfaceState = {
   kind: "selected_object_interface",
   selected_object_id: number,
   last_mouse_pos: vec2,
-  selected_object_state: RotateSelectedObjectState | RotateWithAxisSelectedObjectState | TranslateSelectedObjectState | TranslateWithAxisSelectedObjectState | IdleSelectedObjectState;
+  selected_object_state: ScaleSelectedObjectState
+  | RotateSelectedObjectState | RotateWithAxisSelectedObjectState
+  | TranslateSelectedObjectState | TranslateWithAxisSelectedObjectState
+  | IdleSelectedObjectState;
 }
 
 type IdleInterfaceState = {
@@ -1293,6 +1322,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
         Math.floor(Math.random() * 0xFFFFFFFF),
         vec3.fromValues(0, 0, 0),
         quat.create(),
+        1,
         loadPly(await ply_file.arrayBuffer()),
       );
     }
@@ -1366,6 +1396,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                     kind: "line",
                     translation: srcObj.translation,
                     rotation: srcObj.rotation,
+                    scale: srcObj.scale,
                     vertexes: axesLines(4)
                   })
                   break;
@@ -1380,6 +1411,26 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                     kind: "line",
                     translation: srcObj.translation,
                     rotation: quat.create(),
+                    scale: srcObj.scale,
+                    vertexes: axesLines(4)
+                  })
+                  break;
+                }
+                case "s": {
+                  this.interface_state.selected_object_state = {
+                    kind: "scale",
+                    mouse_start: this.interface_state.last_mouse_pos,
+                    scale_start: 1.0
+                  };
+                  this.overlayEngine.removeObject(this.interface_state.selected_object_id);
+
+                  let srcObj = this.gsRendererEngine.getObject(this.interface_state.selected_object_id)!;
+
+                  this.overlayEngine.addObject(this.interface_state.selected_object_id, {
+                    kind: "line",
+                    translation: srcObj.translation,
+                    rotation: quat.create(),
+                    scale: srcObj.scale,
                     vertexes: axesLines(4)
                   })
                   break;
@@ -1407,6 +1458,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                 }
                 case 'Escape': {
                   switch (this.interface_state.selected_object_state.kind) {
+                    case "scale":
                     case "rotate_with_axis":
                     case "translate_with_axis":
                     case "rotate":
@@ -1457,6 +1509,13 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
                     this.gsRendererEngine.setPositionObject(this.interface_state.selected_object_id, translation);
                     this.overlayEngine.setPositionObject(this.interface_state.selected_object_id, translation);
                   }
+                  break;
+                }
+                case "scale": {
+                  const mouse_delta = vec2.sub(vec2.create(), input.location, this.interface_state.selected_object_state.mouse_start);
+                  const scale = this.interface_state.selected_object_state.scale_start + mouse_delta[0] * 0.01;
+                  this.gsRendererEngine.setScaleObject(this.interface_state.selected_object_id, scale);
+                  this.overlayEngine.setScaleObject(this.interface_state.selected_object_id, scale);
                   break;
                 }
                 default: {
