@@ -1,10 +1,8 @@
 import React from "react";
 import { createShader, createProgram, createTexture, createRGBA32FTexture, createDepth32FTexture, createR32UITexture, } from '../utils/webgl';
 import { Camera, TrackballCamera, } from '../utils/camera';
-import { mat3, mat4, quat, vec2, vec3 } from 'gl-matrix';
-import { arrayMax, deg2rad } from "../utils/math";
+import { mat4, quat, vec2, vec3 } from 'gl-matrix';
 import { GaussianObjectInput, loadPly } from "./gaussian_renderer_utils/sceneLoader";
-import Form from 'react-bootstrap/Form';
 import { genPlane } from "../utils/uvplane";
 import { Vertex } from "../utils/vertex";
 import { arrowAroundPoint, polyline, polyline_facing_point } from "../utils/polyline";
@@ -423,7 +421,7 @@ class GaussianRendererEngine {
     return this.sceneGraph.get(id);
   }
 
-  addObject = (id: number, translate: vec3, rotate: quat, scale:number, object: GaussianObjectInput) => {
+  addObject = (id: number, translate: vec3, rotate: quat, scale: number, object: GaussianObjectInput) => {
     this.sceneGraph.set(id, { translation: translate, rotation: rotate, object, scale });
     this.needs_rebuild = true;
   }
@@ -1626,10 +1624,7 @@ class GaussianEditor extends React.Component<GaussianRendererProps, GaussianEdit
         height={this.props.height}
         width={this.props.width}
       />
-      <Form.Group controlId="formFile" className="mb-3">
-        <Form.Label>Select PLY File</Form.Label>
-        <Form.Control ref={this.fileInput} type="file" accept=".ply" onChange={this.handleFileInputChange} />
-      </Form.Group>
+      <input ref={this.fileInput} type="file" accept=".ply" onChange={this.handleFileInputChange} />
     </>
   }
 }
