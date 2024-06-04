@@ -132,14 +132,14 @@ onmessage = (event: MessageEvent<SortWorkerInput>) => {
 
     postMessage({
         data, sortTime,
-    }, [
+    }, { transfer: [
         data.positions.buffer,
         data.colors.buffer,
         data.opacities.buffer,
         data.cov3Da.buffer,
         data.cov3Db.buffer,
         data.objectIds.buffer,
-    ])
+    ]});
 }
 
 function sortGaussiansByDepth(gaussian_positions: Float32Array, viewMatrix: Float32Array, sortingAlgorithm: string): Uint32Array {
